@@ -4,6 +4,8 @@ import numpy as np
 import random
 import time
 import threading
+import math
+import time
 
 def seeding_algorithm(graph: nx.Graph,
                       number_of_districts: int,
@@ -69,7 +71,7 @@ def seeding_algorithm(graph: nx.Graph,
 
     number_of_districts -= len(districts)
 
-    #random.seed(seed)
+    random.seed(seed)
     #Creating the remaining districts as long as there are nodes in the graph
     while len(graph_copy.nodes) > number_of_districts and len(graph_copy.nodes) > 0 and number_of_districts > 0:
         district = []
@@ -220,13 +222,34 @@ def graph_cut_algorithm(graph: nx.Graph,
     list
         List of districts, where each district is a list of node IDs.
     """
+
+    def turn_on_edges(edge_set, current_districts, q):
+            for subgraph in current_districts:
+                for node in subgraph.nodes:
+                    for neighbor in graph.neighbors(node):
+                        if neighbor in subgraph.nodes and random.random() < q and (node, neighbor) not in edge_set and (neighbor, node) not in edge_set:
+                            edge_set.add((node, neighbor))
+
+    def identify_boundary_nodes(current_districts, boundary_nodes):
+            for subgraph in current_districts:
+                for node in subgraph.nodes:
+                    if any(neighbor not in subgraph.nodes for neighbor in graph.neighbors(node)):
+                        boundary_nodes.add(node)
+
+    def cumulative_distribution(lam, k, result_list):
+        result = 0
+        for i in range(k + 1):
+            result += lam**i / math.factorial(i)
+        result_list.append(np.exp(-lam) * result)
+
     random.seed(seed)
 
     # Initial districts from the seeding algorithm (pi_0)
     starting_districts = seeding_algorithm(graph, number_of_districts, deriviation, seed)
+    average_voters = sum(graph.nodes[node]['voters'] for node in graph.nodes) / number_of_districts
 
     # Convert initial districts into subgraph objects
-    subgraphs = []
+    current_districts = []
     for district in starting_districts:
         subgraph = nx.Graph()
         for node in district:
@@ -234,59 +257,36 @@ def graph_cut_algorithm(graph: nx.Graph,
             for neighbor in graph.neighbors(node):
                 if neighbor in district:
                     subgraph.add_edge(node, neighbor)
-        subgraphs.append(subgraph)
+        current_districts.append(subgraph)
 
-    # Helper function to compute total voters in a district
-    def compute_total_voters(subgraph):
-        return sum(subgraph.nodes[node]['voters'] for node in subgraph.nodes)
+    #make dictonary there the key is the node and the value is the subdistrict id in subgraphs list
+    node_to_subgraph = {node: i for i, subgraph in enumerate(current_districts) for node in subgraph.nodes}
 
     # Initialize parameters for the algorithm
     q = 0.05  # Probability to "turn on" edges
     max_iterations = 1000  # Maximum number of MCMC iterations
-    current_districts = starting_districts.copy()
 
     for iteration in range(max_iterations):
+        threads = []
+
         # Step 1: "Turn on" edges
         edge_set = set()
-        threads = []
         
-        # Helper function to turn on edges in one subgraph (parallelizable)
-        def turn_on_edges(subgraph, edge_set):
-            for node in subgraph.nodes:
-                for neighbor in graph.neighbors(node):
-                    if neighbor in subgraph.nodes and random.random() < q:
-                        edge_set.add((node, neighbor))
-
-        # Turn on edges in parallel
-        for subgraph in subgraphs:
-            thread = threading.Thread(target=turn_on_edges, args=(subgraph, edge_set))
-            threads.append(thread)
-            thread.start()
-
-        for thread in threads:
-            thread.join()
+        thread = threading.Thread(target=turn_on_edges, args=(edge_set, current_districts, q))
+        thread.start()
+        threads.append(thread)
             
-
         # Step 2: Identify boundary connected components
         boundary_nodes = set()
-        threads = []
 
-        # Helper function to identify boundary nodes in one subgraph (parallelizable)
-        def identify_boundary_nodes(subgraph, boundary_nodes):
-            for node in subgraph.nodes:
-                if any(neighbor not in subgraph.nodes for neighbor in graph.neighbors(node)):
-                    boundary_nodes.add(node)
-
-        # Identify boundary nodes in parallel
-        for subgraph in subgraphs:
-            thread = threading.Thread(target=identify_boundary_nodes, args=(subgraph, boundary_nodes))
-            threads.append(thread)
-            thread.start()
+        thread = threading.Thread(target=identify_boundary_nodes, args=(current_districts, boundary_nodes))
+        thread.start()
+        threads.append(thread)
 
         for thread in threads:
             thread.join()
 
-        boundary_components = []
+        boundary_components = [] #B(CP, pi_t) in the paper
         visited = set()
         for node in boundary_nodes:
             if node not in visited:
@@ -299,62 +299,182 @@ def graph_cut_algorithm(graph: nx.Graph,
                         component.add(current)
                         stack.extend(
                             neighbor for neighbor in graph.neighbors(current)
-                            if neighbor in boundary_nodes and neighbor not in visited
+                            if neighbor not in visited and ((current, neighbor) in edge_set or (neighbor, current) in edge_set)
                         )
                 boundary_components.append(component)
 
         # Step 3: Select nonadjacent connected components
-        R = random.randint(1, len(boundary_components))
-        selected_components = []
-        for i in range(R):
+        B_CP_pi = boundary_components.copy()
+        R = -1 
+        while R < 0 or R >= len(boundary_components):
+            R = int(np.random.poisson(lam=10))
+
+        selected_components = [] #V_cp in the paper
+        while len(selected_components) < R:
             component = random.choice(boundary_components)
-            if all(
-                not any(neighbor in subgraph.nodes for neighbor in graph.neighbors(node))
-                for node in component
-                for subgraph in subgraphs
-            ):
-                selected_components.append(component)
-            else:
-                i -= 1
+
+            if component in selected_components:
+                continue
+            
+            #check if component is adjacent to another element of V_cp by checking if there is an edge between the two components in the graph
+            adjacent = False
+            for selected_component in selected_components:
+                if any(graph.has_edge(node1, node2) for node1 in component for node2 in selected_component):
+                    adjacent = True
+                    break
+
+            #check if the removal of V_cp results in a noncontiguous district
+            if not adjacent:
+                #find from which district the component is
+                component_district = node_to_subgraph.get(next(iter(component)), None)
+                if component_district is not None:
+                    #remove the component from the district
+                    district = current_districts[component_district].copy()
+                    for node in component:
+                        district.remove_node(node)
+                    #check if the district is still contiguous
+                    if nx.number_connected_components(district) == 1:
+                        selected_components.append(component)
+                    else:
+                        boundary_components.remove(component)
+                        if len(boundary_components) <= R:
+                            R = len(boundary_components) - 1
+        V_cp = selected_components.copy()
 
         # Step 4: Propose district swaps
-        proposed_districts = current_districts.copy()
+        proposed_districts = copy.deepcopy(current_districts)
+        proposed_node_to_subgraph = node_to_subgraph.copy()
+
         for component in selected_components:
-            candidate_districts = [d for d in current_districts if not set(component).intersection(d)]
-            if candidate_districts:
-                target_district = random.choice(candidate_districts)
-                for node in component:
-                    for district in proposed_districts:
-                        if node in district:
-                            district.remove(node)
-                            break
-                    target_district.append(node)
+            #get a random district to move the component to, which is connected to the component
+            connected_districts = set()
+            for node in component:
+                for neighbor in graph.neighbors(node):
+                    if neighbor in node_to_subgraph:
+                        connected_districts.add(node_to_subgraph.get(neighbor))
+            
+            #remove the district from the connected_districts set
+            current_district = node_to_subgraph.get(next(iter(component)))
+            connected_districts.discard(current_district)
+
+            #if there are no connected districts, skip the component (in typical case, this should not happen)
+            if len(connected_districts) == 0:
+                continue
+
+            #get the district to move the component to
+            proposed_district = random.choice(list(connected_districts))
+
+            #move the component to the proposed district
+            for node in component:
+                proposed_districts[current_district].remove_node(node)
+                proposed_districts[proposed_district].add_node(node, voters=graph.nodes[node]['voters'])
+                proposed_node_to_subgraph.update({node: proposed_district})
+
+            #update connections in the proposed district according to the graph
+            for node in component:
+                for neighbor in graph.neighbors(node):
+                    if neighbor in proposed_districts[proposed_district]:
+                        proposed_districts[proposed_district].add_edge(node, neighbor)
 
         # Step 5: Accept or reject the proposal
-        current_population_variance = sum(
-            abs(compute_total_voters(subgraph) - sum(graph.nodes[node]['voters'] for node in graph) / number_of_districts)
-            for subgraph in subgraphs
-        )
-        proposed_population_variance = sum(
-            abs(compute_total_voters(nx.subgraph(graph, district)) - sum(graph.nodes[node]['voters'] for node in graph) / number_of_districts)
-            for district in proposed_districts
-        )
 
-        acceptance_ratio = min(1, proposed_population_variance / current_population_variance)
-        if random.random() < acceptance_ratio:
-            current_districts = proposed_districts
+        #get B_CP_pi_prime
+        boundary_nodes_prime = set()
 
-    return current_districts
+        identify_boundary_nodes(proposed_districts, boundary_nodes_prime)
+        
+        B_CP_pi_prime = []
 
+        visited = set()
+        for node in boundary_nodes_prime:
+            if node not in visited:
+                component = set()
+                stack = [node]
+                while stack:
+                    current = stack.pop()
+                    if current not in visited:
+                        visited.add(current)
+                        component.add(current)
+                        stack.extend(
+                            neighbor for neighbor in graph.neighbors(current)
+                            if neighbor not in visited and ((current, neighbor) in edge_set or (neighbor, current) in edge_set)
+                        )
+                B_CP_pi_prime.append(component)
 
+        #get F(∣B(CP,π)∣) where F - dystrybuanta
+        F_B_CP_pi = 0
+        F_B_CP_pi_prime = 0
+        lambda_val = 10
+        
+        #get F(∣B(CP,π)∣) where F - cumulative distribution
+        F_B_CP_pi_list = []
+        thread_pi = threading.Thread(target=cumulative_distribution, args=(lambda_val, len(B_CP_pi), F_B_CP_pi_list))
+        thread_pi.start()
+
+        #get F(∣B(CP,π′)∣) where F - cumulative distribution
+        F_B_CP_pi_prime_list = []
+        thread_pi_prime = threading.Thread(target=cumulative_distribution, args=(lambda_val, len(B_CP_pi_prime), F_B_CP_pi_prime_list))
+        thread_pi_prime.start()
+
+        #Get |C(π, V_CP)| and |C(π', V_CP)|
+        C_pi_V_cp = set()
+        C_pi_prime_V_cp = set()
+
+        #unpack V_cp to get all nodes in the components
+        nodes_vcp = set()
+        for component in V_cp:
+            nodes_vcp.update(component)
+
+        for node in nodes_vcp:
+            #C_pi_V_cp
+            district = node_to_subgraph.get(node, None)
+            if district is None:
+                raise ValueError("Node is not in any district")
+            for neighbor in current_districts[district].neighbors(node):
+                if neighbor not in nodes_vcp:
+                    C_pi_V_cp.add((node, neighbor))
+
+            #C_pi_prime_V_cp
+            district = proposed_node_to_subgraph.get(node, None)
+            if district is None:
+                raise ValueError("Node is not in any district")
+            for neighbor in proposed_districts[district].neighbors(node):
+                if neighbor not in nodes_vcp:
+                    C_pi_prime_V_cp.add((node, neighbor))
+
+        beta = 1 #TODO
+        def g_beta(districts, beta):
+            result = 0
+            for district in districts:
+                result += (sum(graph.nodes[node]['voters'] for node in district)/average_voters) - 1
+            return np.exp(-beta * result)
+        
+        thread_pi.join()
+        F_B_CP_pi = F_B_CP_pi_list[0]
+        thread_pi_prime.join()
+        F_B_CP_pi_prime = F_B_CP_pi_prime_list[0]
+
+        #get the acceptance probability
+        acceptance_probability = ((len(B_CP_pi)/len(B_CP_pi_prime))**R) * (F_B_CP_pi/F_B_CP_pi_prime) * (((1-q)**len(C_pi_prime_V_cp)) / ((1-q)**len(C_pi_V_cp))) * (g_beta(proposed_districts, beta) / g_beta(current_districts, beta))
+        acceptance_probability = min(1, acceptance_probability)
+
+        if random.random() <= acceptance_probability:
+            current_districts = copy.deepcopy(proposed_districts)
+            node_to_subgraph = proposed_node_to_subgraph.copy()
+        
+        if iteration % 100 == 0:
+            print(f"Iteration {iteration}")
+    # Return the final districts
+    districts = []
+    for subgraph in current_districts:
+        districts.append(list(subgraph.nodes))
+    
+    return districts, starting_districts
 
 
 import pickle as pkl
 graph = pkl.load(open("pickle_files/graph_voters.pkl", "rb"))
-for i in range(100):
-    dist = graph_cut_algorithm(graph, 460)
-    sum_of_nodes = 0
-    for d in dist:
-        sum_of_nodes += len(d.nodes)
+new, old = graph_cut_algorithm(graph, 460)
 
-    print(i, " ", sum_of_nodes) if sum_of_nodes != 2477 else print(i," OK")
+pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
+pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
