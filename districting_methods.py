@@ -203,6 +203,7 @@ def graph_cut_algorithm(graph: nx.Graph,
                         q: float = 0.05,
                         num_of_chains: int = 5,
                         max_iterations: int = 200,
+                        T: int = 100,
                         seed: int = int(time.time()),
                         ) -> list:
     """
@@ -249,12 +250,6 @@ def graph_cut_algorithm(graph: nx.Graph,
                     if any(neighbor not in subgraph.nodes for neighbor in graph.neighbors(node)):
                         boundary_nodes.add(node)
 
-    def cumulative_distribution(lam, k, result_list):
-        result = 0
-        for i in range(k + 1):
-            result += lam**i / math.factorial(i)
-        result_list.append(np.exp(-lam) * result)
-
     def g_beta(districts, beta):
         result = 0
         for district in districts:
@@ -263,8 +258,25 @@ def graph_cut_algorithm(graph: nx.Graph,
 
     random.seed(seed)
 
+    cumulative_distributions = [0] * (len(graph.nodes) + 1)
+    result = lambda_val
+    temp = lambda_val
+    cumulative_distributions[0] = np.exp(-lambda_val) * result
+    for i in range(1, len(graph.nodes) + 1):
+        temp *= (lambda_val / i)
+        result += temp
+        cumulative_distributions[i] = np.exp(-lambda_val) * result
+
     # Initial districts from the seeding algorithm (pi_0)
-    starting_districts = seeding_algorithm(graph, number_of_districts, deriviation, seed)
+    temp = True
+    starting_districts = []
+    while temp:
+        try:
+            starting_districts = seeding_algorithm(graph, number_of_districts, deriviation, seed)
+            temp = False
+        except ValueError as e:
+            seed += 1
+
     average_voters = sum(graph.nodes[node]['voters'] for node in graph.nodes) / number_of_districts
 
     # Convert initial districts into subgraph objects
@@ -286,26 +298,15 @@ def graph_cut_algorithm(graph: nx.Graph,
                         _current_districts : list,
                         _node_to_subgraph : dict,
                         ):
-        print(f"Starting chain with beta = {beta}", random.random())
         for iteration in range(iterations):
-            threads = []
-
             # Step 1: "Turn on" edges
             edge_set = set()
-            
-            thread = threading.Thread(target=turn_on_edges, args=(edge_set, _current_districts, q))
-            thread.start()
-            threads.append(thread)
+            turn_on_edges(edge_set, _current_districts, q)
                 
             # Step 2: Identify boundary connected components
             boundary_nodes = set()
 
-            thread = threading.Thread(target=identify_boundary_nodes, args=(_current_districts, boundary_nodes))
-            thread.start()
-            threads.append(thread)
-
-            for thread in threads:
-                thread.join()
+            identify_boundary_nodes(_current_districts, boundary_nodes)
 
             boundary_components = [] #B(CP, pi_t) in the paper
             visited = set()
@@ -328,7 +329,9 @@ def graph_cut_algorithm(graph: nx.Graph,
             B_CP_pi = boundary_components.copy()
             R = -1 
             while R < 0 or R >= len(boundary_components):
-                R = int(np.random.poisson(lam=10))
+                R = int(np.random.poisson(lam=lambda_val))
+
+            print(f"R: {R}", "Boundary components:", len(boundary_components))
 
             selected_components = [] #V_cp in the paper
             while len(selected_components) < R:
@@ -368,12 +371,8 @@ def graph_cut_algorithm(graph: nx.Graph,
 
             for component in selected_components:
                 #get a random district to move the component to, which is connected to the component
-                connected_districts = set()
-                for node in component:
-                    for neighbor in graph.neighbors(node):
-                        if neighbor in _node_to_subgraph:
-                            connected_districts.add(_node_to_subgraph.get(neighbor))
-                
+                connected_districts = {_node_to_subgraph[neighbor] for node in component for neighbor in graph.neighbors(node) if neighbor in _node_to_subgraph}
+
                 #remove the district from the connected_districts set
                 current_district = _node_to_subgraph.get(next(iter(component)))
                 connected_districts.discard(current_district)
@@ -422,18 +421,8 @@ def graph_cut_algorithm(graph: nx.Graph,
                             )
                     B_CP_pi_prime.append(component)
 
-            F_B_CP_pi = 0
-            F_B_CP_pi_prime = 0
-            
-            #get F(∣B(CP,π)∣) where F - cumulative distribution
-            F_B_CP_pi_list = []
-            thread_pi = threading.Thread(target=cumulative_distribution, args=(lambda_val, len(B_CP_pi), F_B_CP_pi_list))
-            thread_pi.start()
-
-            #get F(∣B(CP,π′)∣) where F - cumulative distribution
-            F_B_CP_pi_prime_list = []
-            thread_pi_prime = threading.Thread(target=cumulative_distribution, args=(lambda_val, len(B_CP_pi_prime), F_B_CP_pi_prime_list))
-            thread_pi_prime.start()
+            F_B_CP_pi = cumulative_distributions[len(B_CP_pi)]
+            F_B_CP_pi_prime = cumulative_distributions[len(B_CP_pi_prime)]
 
             #Get |C(π, V_CP)| and |C(π', V_CP)|
             C_pi_V_cp = set()
@@ -460,43 +449,67 @@ def graph_cut_algorithm(graph: nx.Graph,
                 for neighbor in proposed_districts[district].neighbors(node):
                     if neighbor not in nodes_vcp:
                         C_pi_prime_V_cp.add((node, neighbor))
-            
-            thread_pi.join()
-            F_B_CP_pi = F_B_CP_pi_list[0]
-            thread_pi_prime.join()
-            F_B_CP_pi_prime = F_B_CP_pi_prime_list[0]
 
             #get the acceptance probability
-            acceptance_probability = ((len(B_CP_pi)/len(B_CP_pi_prime))**R) * (F_B_CP_pi/F_B_CP_pi_prime) * (((1-q)**len(C_pi_prime_V_cp)) / ((1-q)**len(C_pi_V_cp))) * (g_beta(proposed_districts, beta) / g_beta(_current_districts, beta))
+            acceptance_probability = ((len(B_CP_pi)/len(B_CP_pi_prime))**R) * (F_B_CP_pi/F_B_CP_pi_prime) * ((1-q)**(len(C_pi_prime_V_cp) - len(C_pi_V_cp))) * (g_beta(proposed_districts, beta) / g_beta(_current_districts, beta))
+            print(f"Acceptance probability: {acceptance_probability}")
             acceptance_probability = min(1, acceptance_probability)
 
             if random.random() <= acceptance_probability:
-
                 _current_districts.clear()
                 _current_districts.extend(proposed_districts)
 
                 _node_to_subgraph.clear()
                 _node_to_subgraph.update(proposed_node_to_subgraph)
 
-            
-            if iteration % 100 == 0:
-                print(f"Iteration {iteration}")
+    chain_threads = []
+    chain_current_districts = [copy.deepcopy(current_districts) for i in range(num_of_chains * (beta_end - beta_start + 1))]
+    chain_node_to_subgraph = [node_to_subgraph.copy() for i in range(num_of_chains * (beta_end - beta_start + 1))]
+    chain_data = []
 
-    chains = []
-    chain_current_districts = [copy.deepcopy(current_districts) for i in range(num_of_chains)]
-    chain_node_to_subgraph = [node_to_subgraph.copy() for i in range(num_of_chains)]
-    for i in range(num_of_chains):
-        chains.append(threading.Thread(target=main_algorithm, args=(random.randint(beta_start, beta_end), max_iterations, chain_current_districts[i], chain_node_to_subgraph[i])))
+    index = 0
+    for i in range(beta_start, beta_end + 1):
+        for j in range(num_of_chains):
+            chain_data.append(i)
+            chain_threads.append(threading.Thread(target=main_algorithm, args=(i, min(T, max_iterations), chain_current_districts[index], chain_node_to_subgraph[index])))
+            index += 1
 
-    for chain in chains:
+    for chain in chain_threads:
         chain.start()
 
-    for chain in chains:
+    for chain in chain_threads:
         chain.join()
+
+    iterations = T
+    while iterations < max_iterations:
+        j = random.randint(0, num_of_chains * (beta_end - beta_start + 1) - 1)
+        k = random.randint(0, num_of_chains * (beta_end - beta_start + 1) - 1)
+
+        if j == k:
+            k = (k + 1) % (num_of_chains * (beta_end - beta_start + 1))
+
+        gamma = min(1, (g_beta(chain_current_districts[j], chain_data[k]) * g_beta(chain_current_districts[k], chain_data[j])) / (g_beta(chain_current_districts[j], chain_data[j]) * g_beta(chain_current_districts[k], chain_data[k])))
+        print(f"Gamma: {gamma}")
+        if random.random() < gamma:
+            chain_data[j], chain_data[k] = chain_data[k], chain_data[j]
+        
+        for i in range(num_of_chains * (beta_end - beta_start + 1)):
+            chain_threads[i] = threading.Thread(target=main_algorithm, args=(chain_data[i], min(T, max_iterations - iterations), chain_current_districts[i], chain_node_to_subgraph[i]))
+        
+        for chain in chain_threads:
+            chain.start()
+
+        for chain in chain_threads:
+            chain.join()
+
+        iterations += T
+
 
     #get the final districts with the smallest variance of voters
     best_proposal_index = -1
+    worst_proposal_index = -1
     best_proposal_score = np.var([sum(graph.nodes[node]['voters'] for node in district.nodes) for district in current_districts])
+    worst_proposal_score = np.inf
     print(f"Starting score: {best_proposal_score}")
     for i, proposal in enumerate(chain_current_districts):
         score = np.var([sum(graph.nodes[node]['voters'] for node in district.nodes) for district in proposal])
@@ -504,20 +517,29 @@ def graph_cut_algorithm(graph: nx.Graph,
         if score < best_proposal_score:
             best_proposal_score = score
             best_proposal_index = i
+        if score > worst_proposal_score:
+            worst_proposal_index = i
+            worst_proposal_score = score
+
+    districts = []
 
     if best_proposal_index == -1:
-        return starting_districts, starting_districts
-    
-    districts = []
-    for district in chain_current_districts[best_proposal_index]:
-        districts.append(list(district.nodes))
+        for district in current_districts:
+            districts.append(list(district.nodes))
+    else:
+        for district in chain_current_districts[best_proposal_index]:
+            districts.append(list(district.nodes))
+
+    starting_districts = []
+    for district in chain_current_districts[worst_proposal_index]:
+        starting_districts.append(list(district.nodes))
     
     return districts, starting_districts
 
 
 import pickle as pkl
 graph = pkl.load(open("pickle_files/graph_voters.pkl", "rb"))
-new, old = graph_cut_algorithm(graph, 460, max_iterations=200)
+new, old = graph_cut_algorithm(graph, 100, max_iterations=2000, T=200, num_of_chains=2, lambda_val=5, beta_end=3)
 
 pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
 pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
