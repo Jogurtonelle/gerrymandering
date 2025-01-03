@@ -1,11 +1,9 @@
-import copy
+from copy import deepcopy
 import networkx as nx
 import numpy as np
 import random
 import time
 import threading
-import math
-import time
 
 def seeding_algorithm(graph: nx.Graph,
                       number_of_districts: int,
@@ -43,10 +41,19 @@ def seeding_algorithm(graph: nx.Graph,
     [1] https://doi.org/10.1016/S0962-6298(99)00047-5
     """
 
+    def seeding_algorithm_inner(graph: nx.Graph,
+                                number_of_districts: int,
+                                deriviation: float = 0.01,
+                                seed: int = int(time.time()),
+                                ) -> list:
+        """
+        Helper function for seeding_algorithm (to prevent isolation of nodes - if occurs, then rerun the seeding algorithm)
+        """
+    
     if deriviation > 1 or deriviation < 0:
         raise ValueError("Derivation has to be between 0 and 1")
     
-    graph_copy = copy.deepcopy(graph)
+    graph_copy = deepcopy(graph)
 
     #Calculate the average number of voters in a district
     total_voters = 0
@@ -183,15 +190,6 @@ def seeding_algorithm(graph: nx.Graph,
         for node in graph_copy.nodes:
             districts.append([node])
  
-    covered_nodes = {node for district in districts for node in district}
-    missing_nodes = set(graph.nodes) - covered_nodes
-    extra_nodes = covered_nodes - set(graph.nodes)
-
-    if missing_nodes:
-        print(f"Missing nodes: {missing_nodes}")
-    if extra_nodes:
-        print(f"Extra nodes: {extra_nodes}")
-
     return districts
 
 def graph_cut_algorithm(graph: nx.Graph,
@@ -366,7 +364,7 @@ def graph_cut_algorithm(graph: nx.Graph,
             V_cp = selected_components.copy()
 
             # Step 4: Propose district swaps
-            proposed_districts = copy.deepcopy(_current_districts)
+            proposed_districts = deepcopy(_current_districts)
             proposed_node_to_subgraph = _node_to_subgraph.copy()
 
             for component in selected_components:
@@ -463,7 +461,7 @@ def graph_cut_algorithm(graph: nx.Graph,
                 _node_to_subgraph.update(proposed_node_to_subgraph)
 
     chain_threads = []
-    chain_current_districts = [copy.deepcopy(current_districts) for i in range(num_of_chains * (beta_end - beta_start + 1))]
+    chain_current_districts = [deepcopy(current_districts) for i in range(num_of_chains * (beta_end - beta_start + 1))]
     chain_node_to_subgraph = [node_to_subgraph.copy() for i in range(num_of_chains * (beta_end - beta_start + 1))]
     chain_data = []
 
