@@ -164,40 +164,58 @@ def seeding_algorithm(graph: nx.Graph,
         #Add nodes that during the process were made isolated
         covered_nodes = {node for district in districts for node in district}
         missing_nodes = set(graph.nodes) - covered_nodes
-        for node in missing_nodes:
-            #select a random neighbour of node
-            finish = False
-            i = 0
-            while not finish:
-                neighbor = random.choice(list(graph.neighbors(node)))
-                if neighbor in covered_nodes:
-                    #add node to the district of the neighbor
-                    for district in districts:
-                        if neighbor in district:
-                            district.append(node)
-                            covered_nodes.add(node)
-                            finish = True
-                            break
-                i += 1
-                if i > 50:
-                    #Probability that this happens is too low to be considered, so it is an error
-                    raise ValueError("Unexpected error in seeding algorithm - please try again with a different seed")
+        prev_len_missing_nodes = len(missing_nodes)
 
+        if len(missing_nodes) > 0.05 * len(graph.nodes):
+            return [], True
+        
+        while missing_nodes:
+            for node in missing_nodes:
+                #if the node is not connected to any of the covered nodes, skip it for now (it will be added later)
+                if not any(neighbor in covered_nodes for neighbor in graph.neighbors(node)):
+                    continue
+
+                #select a random neighbour of node
+                finish = False
+                i = 0
+                while not finish:
+                    neighbor = random.choice(list(graph.neighbors(node)))
+                    if neighbor in covered_nodes:
+                        #add node to the district of the neighbor
+                        for district in districts:
+                            if neighbor in district:
+                                district.append(node)
+                                covered_nodes.add(node)
+                                finish = True
+                                break
+                    i += 1
+                    if i > 50:
+                        #Probability that this happens is too low to be considered, so it is an error
+                        raise ValueError("Unexpected error in seeding algorithm")
+
+            missing_nodes = set(graph.nodes) - covered_nodes
+            if prev_len_missing_nodes == len(missing_nodes):
+                raise ValueError("Unexpected error in seeding algorithm")
 
         #If there are districts with only one node, add them to the list of districts
         if number_of_districts > 0:
             for node in graph_copy.nodes:
                 districts.append([node])
 
-        return districts
+        return districts, False
  
     i = 100
     while i > 0:
         try:
-            return seeding_algorithm_inner(graph, number_of_districts, deriviation, seed)
+            result, try_again = seeding_algorithm_inner(graph, number_of_districts, deriviation, seed)
+            if try_again:
+                deriviation *= 1.5
+                i -= 1
+            else:
+                return result
         except ValueError as e:
             i -= 1
-            #print(f"Error in seeding algorithm - retrying {100 - i}/100")
+            print(f"Error in seeding algorithm - retrying {100 - i}/100")
             seed += 1
 
     raise ValueError("Unexpected error in seeding algorithm")
@@ -544,119 +562,63 @@ def graph_cut_algorithm(graph: nx.Graph,
     
     return districts, districts
 
-def markov_simulated_annealing( graph: nx.Graph,
-                                number_of_districts: int,
-                                beta_1: float = 1,
-                                beta_2: float = 1,
-                                seed: int = int(time.time()),
-                                ) -> list:
-    
-    districts = seeding_algorithm(graph, number_of_districts, seed=seed)
-    dist_dict = {}
-    dist_population_dict = {}
-    dist_graph = nx.Graph(graph)
-    try:
-        avg_voters = sum(graph.nodes[node]['voters'] for node in graph.nodes) / number_of_districts
-    except KeyError:
-        raise ValueError("Each node in the graph has to have a 'voters' attribute coreesponding to the number of voters in the county")
-
-    pop_eq = 0
-    district_index = 0
-    for dist in districts:
-        for node in dist:
-            dist_dict.update({node: district_index})
-            dist_population_dict.update({district_index: dist_population_dict.get(district_index, 0) + graph.nodes[node]['voters']})
-            for neighbor in graph.neighbors(node):
-                if neighbor in dist:
-                    dist_graph.edges[node, neighbor]['is_active'] = True
-        pop_eq += abs(dist_population_dict.get(district_index, 0) - avg_voters)
-        district_index += 1
-    
-    not_active_edges = set()
-    for edge in dist_graph.edges:
-        if 'is_active' not in dist_graph.edges[edge]:
-            dist_graph.edges[edge]['is_active'] = False
-            not_active_edges.add(edge)
-    
-    #Getting nodes v such that N(v) & S_δ(S_delta) is not empty
-    boundary_nodes = set()
-    for edge in not_active_edges:
-        boundary_nodes.add(edge[0])
-        boundary_nodes.add(edge[1])
-
-    comp = len(not_active_edges) / len(dist_graph.edges)
-    weight = exp(-beta_1 * pop_eq - beta_2 * comp)
-
-    district_proposal = deepcopy(dist_graph)
-    dist_dict_proposal = dist_dict.copy()
-    boundary_nodes_proposal = boundary_nodes.copy()
-    not_active_edges_proposal = not_active_edges.copy()
-    dist_population_dict_proposal = dist_population_dict.copy()
-    while(True):
-        #Randomly select a node v from the boundary nodes and an edge e from intersect of neighbors of v and not active edges
-        v = random.choice(list(boundary_nodes))
-        e = random.choice(list(set(dist_graph.neighbors(v)) & not_active_edges))
-
-        #If the v's district is containing only one node, then skip the iteration (as it is not possible to move the node to create valid districts)
-        if dist_population_dict.get(dist_dict.get(v)) == graph.nodes[v]['voters']:
-            continue
-
-        old_district = dist_dict.get(v)
-        new_district = dist_dict.get(e[0]) if dist_dict.get(e[0]) != old_district else dist_dict.get(e[1])
-
-        #Calculate the new population equality score
-        pop_eq_proposal = pop_eq - abs(dist_population_dict.get(old_district) - avg_voters) - abs(dist_population_dict.get(new_district) - avg_voters) + abs(dist_population_dict.get(old_district) - graph.nodes[v]['voters'] - avg_voters) + abs(dist_population_dict.get(new_district) + graph.nodes[v]['voters'] - avg_voters)
-
-        #Update the proposal
-        dist_dict_proposal.update({v: new_district})
-        dist_population_dict_proposal.update({old_district: dist_population_dict.get(old_district) - graph.nodes[v]['voters']})
-        dist_population_dict_proposal.update({new_district: dist_population_dict.get(new_district) + graph.nodes[v]['voters']})
-
-        for neighbor in dist_graph.neighbors(v):
-            if dist_dict.get(neighbor) == old_district:
-                boundary_nodes_proposal.add(neighbor)
-                not_active_edges_proposal.update({(v, neighbor)})
-                district_proposal.edges[v, neighbor]['is_active'] = False
-
-            if dist_dict.get(neighbor) == new_district:
-                district_proposal.edges[v, neighbor]['is_active'] = True
-                not_active_edges_proposal.discard((v, neighbor))
-                not_active_edges_proposal.discard((neighbor, v)) #two options as it can be in either form
-
-                #Check if the neighbor is still a boundary node
-                if all(dist_dict.get(neighbor) == new_district for neighbor in dist_graph.neighbors(neighbor)):
-                    boundary_nodes_proposal.discard(neighbor)
-
-        comp_proposal = len(not_active_edges_proposal) / len(dist_graph.edges)
-        weight_proposal = exp(-beta_1 * pop_eq_proposal - beta_2 * comp_proposal)
-
-        if random.random() < min(1, weight_proposal / weight):
-            dist_graph = deepcopy(district_proposal)
-            dist_dict = dist_dict_proposal.copy()
-            dist_population_dict = dist_population_dict_proposal.copy()
-            boundary_nodes = boundary_nodes_proposal.copy()
-            not_active_edges = not_active_edges_proposal.copy()
-            pop_eq = pop_eq_proposal
-            weight = weight_proposal
-        else:
-            district_proposal = deepcopy(dist_graph)
-            dist_dict_proposal = dist_dict.copy()
-            boundary_nodes_proposal = boundary_nodes.copy()
-            not_active_edges_proposal = not_active_edges.copy()
-            dist_population_dict_proposal = dist_population_dict.copy()
-
-
 def redist_flip_alg(graph: nx.Graph,
                     number_of_districts: int,
-                    lambda_prob: float = 0.05,
-                    pop_tol_target: float = 0.95,
-                    pop_tol_increase: float = 0.005,
-                    pop_tol_steps_before_increase: int = 10,
-                    comp_weight_target: float = 0.5,
-                    comp_weight_increase: float = 0.01,
+                    hot_steps: int = 500,
+                    annealing_steps: int = 1000,
                     cold_steps: int = 100,
+                    lambda_prob: float = 0.01,
+                    pop_tol_target: float = 0.95,
+                    comp_weight_target: float = 0.5,
                     seed: int = int(time.time()),
                     ) -> list:
+    """
+    Redistricting algorithm by flipping edges, using simulated annealing.
+    
+    Parameters
+    ----------
+    graph : networkx.Graph
+        A graph representing the counties and their neighbors.
+        Each node in the graph needs to have a 'voters' attribute representing the number of voters in the county.
+
+    number_of_districts : int
+        The number of districts to create.
+
+    hot_steps : int, optional
+        The number of steps at the beginning of the algorithm where the acceptance rate is 100%. Default is 500 steps.
+
+    annealing_steps : int, optional
+        The number of steps where the temperature is decreasing. Default is 1000 steps.
+
+    cold_steps : int, optional
+        The number of steps at the end of the algorithm where the temperature is 0. Default is 100 steps.
+
+    lambda_prob : float, optional
+        The probability of flipping an edge. Default is 5%.
+        Value has to be between 0 and 1.
+    
+    pop_tol_target : float, optional
+        The target population tolerance. Default is 0.1 (10%).
+        Population tolerance means the maximum deviation from the average population in a district.
+        Value has to be between 0 and 1.
+
+    comp_weight_target : float, optional
+        The target compactness weight. Default is 0.5.
+        Compactness weight is the ratio of the number of active edges to the total number of edges in the graph to ensure compact districts.
+
+    seed : int, optional
+        The seed for the random number generator. Default is the current time.
+
+    Returns
+    -------
+    list
+        Array of districts. Each district is a list of counties' IDs (acoording to the graph).
+        For a district with one county, the list will contain one element.
+
+    References
+    ----------
+    [1] https://doi.org/10.1016/S0962-6298(99)00047-5
+    """
     
     if lambda_prob < 0 or lambda_prob > 1:
         raise ValueError("Lambda probability has to be between 0 and 1")
@@ -664,23 +626,26 @@ def redist_flip_alg(graph: nx.Graph,
         raise ValueError("Number of districts has to be greater than 0")
     if pop_tol_target < 0 or pop_tol_target > 1:
         raise ValueError("Population tolerance target has to be between 0 and 1")
-    if pop_tol_increase < 0 or pop_tol_increase > 1:
-        raise ValueError("Population tolerance decrease has to be between 0 and 1")
-    if pop_tol_steps_before_increase < 1:
-        raise ValueError("Population tolerance steps before decrease has to be greater than 0")
     if comp_weight_target < 0 or comp_weight_target > 1:
-        raise ValueError("Compactness weight target has to be between 0 and 1")
-    if comp_weight_increase < 0 or comp_weight_increase > 1:
-        raise ValueError("Compactness weight increase has to be between 0 and 1")
-    
-    beta_1, beta_2 = 0, 0 #TODO
-    
+        # raise ValueError("Compactness weight target has to be between 0 and 1") TODO: Check if this is correct
+        pass
+    if hot_steps < 1:
+        raise Warning("Hot steps should be greater than 0, but if you want to skip the hot steps, you're free to do so")
+        hot_steps = 0
+    if cold_steps < 1:
+        raise Warning("Cold steps should be greater than 0, but if you want to skip the hot steps, you're free to do so")
+        cold_steps = 0
+    if annealing_steps < 1:
+        raise ValueError("Annealing steps should be greater than 0")
+        annealing_steps = 0
+
     districts = seeding_algorithm(graph, number_of_districts, seed=seed)
     dist_dict = {}
     dist_population_dict = {}
     dist_graph = nx.Graph(graph)
     try:
-        avg_voters = sum(graph.nodes[node]['voters'] for node in graph.nodes) / number_of_districts
+        total_population = sum(graph.nodes[node]['voters'] for node in graph.nodes)
+        avg_voters = total_population / number_of_districts
     except KeyError:
         raise ValueError("Each node in the graph has to have a 'voters' attribute coreesponding to the number of voters in the county")
 
@@ -696,6 +661,8 @@ def redist_flip_alg(graph: nx.Graph,
         pop_eq += abs(dist_population_dict.get(district_index, 0) - avg_voters)
         district_index += 1
     
+    # pop_eq /= avg_voters
+
     not_active_edges = set()
     for edge in dist_graph.edges:
         if 'is_active' not in dist_graph.edges[edge]:
@@ -711,49 +678,37 @@ def redist_flip_alg(graph: nx.Graph,
         boundary_nodes.add(edge[1])
 
     comp = len(not_active_edges) / len(dist_graph.edges)
-    weight = exp(-beta_1 * pop_eq - beta_2 * comp)
+    print(f"Initial compactness: {comp}")
 
     district_proposal = deepcopy(dist_graph)
     dist_dict_proposal = dist_dict.copy()
-    boundary_nodes_proposal = boundary_nodes.copy()
-    not_active_edges_proposal = not_active_edges.copy()
-    active_edges_proposal = active_edges.copy()
     dist_population_dict_proposal = dist_population_dict.copy()
     pop_eq_proposal = pop_eq
+    prev_exponent = 0
+    pop_eq_beta, comp_beta, steps = 0, 0, 0
 
-
-    pop_tol_steps = pop_tol_target / pop_tol_increase * pop_tol_steps_before_increase
-    comp_weight_steps_before_increase = int(pop_tol_steps / (comp_weight_target / comp_weight_increase))
-    pop_eq_beta = 0
-    comp_beta = 0
-    steps = 0
-    print(f"Starting weight: {weight}")
-    while(steps < pop_tol_steps + cold_steps):
-        timer = time.time()
+    random.seed(seed)
+    rejected = 0
+    accepted = 0
+    data = np.zeros((int((annealing_steps + cold_steps + hot_steps)/100), 2))
+    while steps < annealing_steps + hot_steps + cold_steps:
         #set flipped edges
-        flipped_edges = set(edge for edge in active_edges if random.random() <= lambda_prob)
+        flipped_edges = {edge for edge in active_edges if random.random() <= lambda_prob}
         temp_graph = nx.Graph()
         temp_graph.add_nodes_from(graph.nodes)
+        temp_graph.add_edges_from(flipped_edges)
 
-        #TODO
-        if len(temp_graph.edges) != 0:
-            raise ValueError("Graph has to have edges - debug")
-        
-        for edge in flipped_edges:
-            temp_graph.add_edge(edge[0], edge[1])
-
-        #get boundary connected components
-        boundary_components = []
-        for component in nx.connected_components(temp_graph):
-            if any(node in boundary_nodes for node in component):
-                boundary_components.append(component)
+        # Identify boundary-connected components
+        boundary_components = [comp for comp in nx.connected_components(temp_graph) if any(node in boundary_nodes for node in comp)]
+            
+        if len(boundary_components) == 0:
+            continue
 
         #select a subset of boundary components not connecting to each other
-        R = random.randint(0, len(boundary_components))
-        selected_components = []
-        selected_nodes = set()
+        R = max(min(len(boundary_components) - 1, np.random.normal(0.2*len(boundary_components), 0.2*len(boundary_components))), 1)
+        selected_components, selected_nodes = [], set()
         unchanged_counter = 0
-        while len(selected_components) < R:
+        while len(selected_components) < R and boundary_components:
             component = random.choice(list(boundary_components))
             if component not in selected_components and not any(graph.has_edge(node1, node2) for node1 in component for node2 in selected_nodes):
                 selected_components.append(component)
@@ -762,120 +717,151 @@ def redist_flip_alg(graph: nx.Graph,
                 unchanged_counter = 0
             else:
                 unchanged_counter += 1
-                if unchanged_counter > 50:
+                if unchanged_counter > 20:
                     break
 
         #move the selected components to a new district
         for component in selected_components:
             #if the component is the whole district, skip it as it wont produce a valid districting
-            if sum(graph.nodes[node]['voters'] for node in component) == dist_population_dict.get(dist_dict.get(next(iter(component)))):
+            curr_district = dist_dict.get(next(iter(component)))
+            if sum(graph.nodes[node]['voters'] for node in component) == dist_population_dict_proposal.get(curr_district):
+                continue
+
+            new_curr_district_nodes = {node for node in graph.nodes if dist_dict_proposal.get(node) == curr_district} - component
+            #check if the district is still contiguous (do DFS)
+            visited = set()
+            stack = [next(iter(new_curr_district_nodes))]
+            while stack:
+                current = stack.pop()
+                visited.add(current)
+                stack.extend(neighbor for neighbor in graph.neighbors(current) if neighbor not in visited and neighbor in new_curr_district_nodes)
+
+            if visited != new_curr_district_nodes:
                 continue
 
             #get the district to move the component to
-            connected_districts = set(dist_dict.get(neighbor) for node in component for neighbor in graph.neighbors(node))
-            if len(connected_districts) == 0:
+            connected_districts = {dist_dict.get(neighbor) for node in component for neighbor in graph.neighbors(node)} - {curr_district}
+            if not connected_districts:
                 continue
+
             new_district = random.choice(list(connected_districts))
-            curr_district = dist_dict.get(next(iter(component)))
 
             #move the component to the proposed district
             for node in component:
                 dist_dict_proposal.update({node: new_district})
                 dist_population_dict_proposal.update({new_district: dist_population_dict_proposal.get(new_district, 0) + graph.nodes[node]['voters']})
                 dist_population_dict_proposal.update({dist_dict.get(node): dist_population_dict_proposal.get(curr_district, 0) - graph.nodes[node]['voters']})
-            pop_eq_proposal = pop_eq - abs(dist_population_dict.get(curr_district) - avg_voters) - abs(dist_population_dict.get(new_district) - avg_voters) + abs(dist_population_dict_proposal.get(curr_district) - avg_voters) + abs(dist_population_dict_proposal.get(new_district) - avg_voters)
+            if steps > hot_steps:
+                pop_eq_proposal = (pop_eq - abs(dist_population_dict.get(curr_district) - avg_voters) - abs(dist_population_dict.get(new_district) - avg_voters) + abs(dist_population_dict_proposal.get(curr_district) - avg_voters) + abs(dist_population_dict_proposal.get(new_district) - avg_voters))
 
-            #update the connections in the proposed district and the current district
-            new_district_nodes = set(node for node in dist_dict_proposal if dist_dict_proposal.get(node) == new_district)
-            olf_district_nodes = set(node for node in dist_dict_proposal if dist_dict_proposal.get(node) == curr_district)
-
-            for node in new_district_nodes:
-                for neighbor in graph.neighbors(node):
-                    if neighbor in new_district_nodes:
-                        district_proposal.edges[node, neighbor]['is_active'] = True
-                        if not (node, neighbor) in active_edges_proposal and not (neighbor, node) in active_edges_proposal:
-                            active_edges_proposal.add((node, neighbor))
-                        if (node, neighbor) in not_active_edges_proposal or (neighbor, node) in not_active_edges_proposal:
-                            not_active_edges_proposal.discard((node, neighbor))
-                            not_active_edges_proposal.discard((neighbor, node))
-                    else:
-                        district_proposal.edges[node, neighbor]['is_active'] = False
-                        if (node, neighbor) in active_edges_proposal or (neighbor, node) in active_edges_proposal:
-                            active_edges_proposal.discard((node, neighbor))
-                            active_edges_proposal.discard((neighbor, node))
-                        if not (node, neighbor) in not_active_edges_proposal and not (neighbor, node) in not_active_edges_proposal:
-                            not_active_edges_proposal.add((node, neighbor))
-
-                if any(neighbor not in new_district_nodes for neighbor in graph.neighbors(node)):
-                    boundary_nodes_proposal.add(node)
-            
-            for node in olf_district_nodes:
-                for neighbor in graph.neighbors(node):
-                    if neighbor in olf_district_nodes:
-                        district_proposal.edges[node, neighbor]['is_active'] = True
-                        if not (node, neighbor) in active_edges_proposal and not (neighbor, node) in active_edges_proposal:
-                            active_edges_proposal.add((node, neighbor))
-                        if (node, neighbor) in not_active_edges_proposal or (neighbor, node) in not_active_edges_proposal:
-                            not_active_edges_proposal.discard((node, neighbor))
-                            not_active_edges_proposal.discard((neighbor, node))
-                    else:
-                        district_proposal.edges[node, neighbor]['is_active'] = False
-                        if (node, neighbor) in active_edges_proposal or (neighbor, node) in active_edges_proposal:
-                            active_edges_proposal.discard((node, neighbor))
-                            active_edges_proposal.discard((neighbor, node))
-                        if not (node, neighbor) in not_active_edges_proposal and not (neighbor, node) in not_active_edges_proposal:
-                            not_active_edges_proposal.add((node, neighbor))
-
-                if any(neighbor not in olf_district_nodes for neighbor in graph.neighbors(node)):
-                    boundary_nodes_proposal.add(node)
+        boundary_nodes_proposal = set()
+        active_edges_proposal = set()
+        for edge in dist_graph.edges:
+            if dist_dict_proposal.get(edge[0]) != dist_dict_proposal.get(edge[1]):
+                boundary_nodes_proposal.add(edge[0])
+                boundary_nodes_proposal.add(edge[1])
+                district_proposal.edges[edge]['is_active'] = False
+            else:
+                district_proposal.edges[edge]['is_active'] = True
+                active_edges_proposal.add(edge)
 
         #calculate the weight of the proposal
-        comp_proposal = len(not_active_edges_proposal) / len(dist_graph.edges)
-        weight_proposal = exp(max(-80, -pop_eq_beta * pop_eq_proposal - comp_beta * comp_proposal))
+        if steps > hot_steps:
+            norm_pop_eq_proposal = pop_eq_proposal
+            comp_proposal = (len(dist_graph.edges) - len(active_edges_proposal)) / len(dist_graph.edges)
+            try:
+                exponent = -pop_eq_beta * norm_pop_eq_proposal - comp_beta * comp_proposal
+            except OverflowError:
+                exponent = -80
+            if prev_exponent == 0:
+                    prev_exponent = exponent
+            acceptance_probabilty = exp(min(max(-80, prev_exponent - exponent), 300))
+            print(f"Difference: {prev_exponent - exponent}, Acceptance probability: {acceptance_probabilty}")
 
-        if random.random() < min(1, weight_proposal / weight):
+            if random.random() < acceptance_probabilty:
+                print(f"Accepted at step {steps}/{annealing_steps + cold_steps + hot_steps}, p = {acceptance_probabilty}")
+                dist_graph = deepcopy(district_proposal)
+                dist_dict = dist_dict_proposal.copy()
+                dist_population_dict = dist_population_dict_proposal.copy()
+                boundary_nodes = boundary_nodes_proposal.copy()
+                active_edges = active_edges_proposal.copy()
+                pop_eq = pop_eq_proposal
+                prev_exponent = exponent
+                accepted += 1
+            else:
+                district_proposal = deepcopy(graph)
+                dist_dict_proposal = dist_dict.copy()
+                dist_population_dict_proposal = dist_population_dict.copy()
+                print(f"Rejected at step {steps}/{annealing_steps + cold_steps + hot_steps}, p = {acceptance_probabilty}")
+                rejected += 1
+        #For the hot steps, accept the proposal every time
+        else:
+            print(f"Accepted at step {steps}/{annealing_steps + cold_steps + hot_steps}, p = 1")
             dist_graph = deepcopy(district_proposal)
             dist_dict = dist_dict_proposal.copy()
             dist_population_dict = dist_population_dict_proposal.copy()
             boundary_nodes = boundary_nodes_proposal.copy()
-            not_active_edges = not_active_edges_proposal.copy()
-            pop_eq = pop_eq_proposal
-            weight = weight_proposal
-            print(f"Accepted at step {steps}/{pop_tol_steps + cold_steps}")
-            print(weight_proposal/weight)
-        else:
-            district_proposal = deepcopy(dist_graph)
-            dist_dict_proposal = dist_dict.copy()
-            boundary_nodes_proposal = boundary_nodes.copy()
-            not_active_edges_proposal = not_active_edges.copy()
-            dist_population_dict_proposal = dist_population_dict.copy()
-            print(f"Rejected at step {steps}/{pop_tol_steps + cold_steps}")
-            print(weight_proposal/weight)
-            print(-pop_eq_beta * pop_eq_proposal - comp_beta * comp_proposal)
-            print("pop_eq", pop_eq, pop_eq_proposal)
+            active_edges = active_edges_proposal.copy()
+            accepted += 1
 
         #update the parameters
         steps += 1
-        if steps < pop_tol_steps:
-            if steps % pop_tol_steps_before_increase == 0:
-                pop_eq_beta += pop_tol_increase
-                print(pop_eq_beta, "pop")
-            if steps % comp_weight_steps_before_increase == 0:
-                comp_beta += comp_weight_increase
-                print(comp_beta, "comp")
+        if steps > hot_steps and steps <= hot_steps + annealing_steps:
+            pop_eq_beta += pop_tol_target / annealing_steps
+            comp_beta += comp_weight_target / annealing_steps
+        
+        if steps % 100 == 0:
+            print(f"Step {steps}/{annealing_steps + cold_steps + hot_steps}")
+            print(f"Accepted: {accepted}, Rejected: {rejected}")
+            try:
+                data[int(steps / 100), 0] = accepted
+                data[int(steps / 100), 1] = rejected
+            except IndexError:
+                pass
+            accepted = 0
+            rejected = 0
 
-    if len(dist_dict.values()) != number_of_districts:
+    if len(set(dist_dict.values())) != number_of_districts:
         raise ValueError("Unexpected error in redistricting - number of districts is not correct")
 
-    return [[node for node in dist_dict if dist_dict.get(node) == i] for i in range(number_of_districts)], districts
+    return [[node for node in dist_dict if dist_dict.get(node) == i] for i in range(number_of_districts)], districts, data
 
         
 
 import pickle as pkl
 graph = pkl.load(open("pickle_files/graph_voters.pkl", "rb"))
-# new, old = graph_cut_algorithm(graph, 100, max_iterations=2000, T=200, num_of_chains=2, lambda_val=5, beta_end=3)
+# # new, old = graph_cut_algorithm(graph, 100, max_iterations=2000, T=200, num_of_chains=2, lambda_val=5, beta_end=3)
 
-new, old = redist_flip_alg(graph, 100)
+# threads = []
+# results = [None] * 2
+
+# def run_algorithm(index, *args):
+#     results[index] = redist_flip_alg(*args)
+
+# threads.append(threading.Thread(target=run_algorithm, args=(0, graph, 20, 10, 2000, 200, 0.05, 0.1, 100, 1)))
+# #threads.append(threading.Thread(target=run_algorithm, args=(1, graph, 20, 100, 2000, 200, 0.05, 1, 0.1, 1)))
+
+# for thread in threads:
+#     thread.start()
+
+# for thread in threads:
+#     thread.join()
+
+# new1, old1, data1 = results[0]
+# # new2, old2, data2 = results[1]
+
+# pkl.dump(new1, open("temp/graph_cut_algorithm_1.pkl", "wb"))
+# pkl.dump(old1, open("temp/graph_cut_algorithm_start_1.pkl", "wb"))
+# pkl.dump(data1, open("temp/redist_flip_alg_data_1.pkl", "wb"))
+
+# pkl.dump(new2, open("temp/graph_cut_algorithm_2.pkl", "wb"))
+# pkl.dump(old2, open("temp/graph_cut_algorithm_start_2.pkl", "wb"))
+# pkl.dump(data2, open("temp/redist_flip_alg_data_2.pkl", "wb"))
+
+
+
+new, old, data = redist_flip_alg(graph, 460, hot_steps=50, annealing_steps=200, cold_steps=100, lambda_prob=0.1, pop_tol_target=0.95, comp_weight_target=0.05)
 
 pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
 pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
+pkl.dump(data, open("temp/redist_flip_alg_data.pkl", "wb"))

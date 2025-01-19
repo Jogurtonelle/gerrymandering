@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gerrymandering - Wyniki</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css">
+    <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: row;
+            margin: 0;
+            padding: 0;
+        }
+        #map {
+            flex: 3;
+            height: 100vh;
+            border-right: 1px solid #ccc;
+        }
+        #controls {
+            flex: 5;
+            padding: 20px;
+            overflow-y: auto;
+        }
+        .section {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+        }
+        select, button {
+            margin-bottom: 12px;
+            width: 100%;
+            padding: 8px;
+            font-size: 14px;
+        }
+        #results {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        #charts {
+            display: flex; /* Ustawia elementy w jednym rzędzie */
+            flex-wrap: wrap; /* Pozwala na zawijanie, jeśli brakuje miejsca */
+            justify-content: space-between; /* Równomierne rozmieszczenie między wykresami */
+            align-items: center; /* Centruje wykresy pionowo */
+            gap: 20px; /* Odstępy między wykresami */
+            margin-top: 20px;
+        }
+        .chart-container {
+            flex: 1; /* Równa szerokość dla każdego wykresu */
+            min-width: 100px; /* Minimalna szerokość wykresu */
+        }
+        canvas {
+            max-width: 100%;
+            height: 300px;
+        }
+        #legend-container {
+            margin-top: 20px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            border-radius: 3px;
+        }
+        
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <div id="controls">
+        <div class="section">
+            <label for="election-data">Select past elections results:</label>
+            <select id="election-data" onchange="updateParties()">
+                <option value="">--select election year--</option>
+                {% for election in elections %}
+                    <option value="{{ election.id }}">
+                        Elections {{ election.year }}
+                    </option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="section">
+            <label for="favoured-party">Wybierz faworyzowaną partię:</label>
+            <select id="favoured-party" disabled>
+                <option value="">Wybierz rok wyborów</option>
+            </select>
+        </div>
+
+        <button onclick="redirectToResults()">Show results</button>
+
+        <div id="charts">
+            <div class="chart-container">
+                <h3>Votes division (only parties above the electoral threshold)</h3>
+                <canvas id="votesChart"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <h3>Real seats distribution</h3>
+                <canvas id="realSeatsChart"></canvas>
+            </div>
+
+            <div class="chart-container">
+                <h3>Proposed seats distribution</h3>
+                <canvas id="seatsChart"></canvas>
+            </div>
+            
+        </div>
+        <div id="legend-container">
+            <h3>Legenda</h3>
+            <div id="legend"></div>
+        </div>
+    </div>
+
+    <script>
+        const electionsToParties = {{ elections_to_parties|safe }};
+        const geojsonContent = {{ geojson_content|safe }};
+        const partyColours = {{ party_colours|safe }};
+        const realResults = {{ real_results|safe }};
+        const realSeats = {{ real_seats|safe }};
+        const party_id_to_name = {{ party_id_to_name|safe }};
+        const seats = {{ seats|safe }};
+
+        function updateParties() {
+            const electionSelect = document.getElementById('election-data');
+            const favouredPartySelect = document.getElementById('favoured-party');
+
+            const selectedElectionId = electionSelect.value;
+            favouredPartySelect.innerHTML = '';
+            favouredPartySelect.disabled = true;
+
+            if (selectedElectionId && electionsToParties[selectedElectionId]) {
+                const parties = electionsToParties[selectedElectionId];
+
+                const defaultOption = document.createElement('option');
+                defaultOption.value = '0';
+                defaultOption.textContent = 'Brak faworyzowanej partii';
+                favouredPartySelect.appendChild(defaultOption);
+
+                parties.forEach(party => {
+                    const option = document.createElement('option');
+                    option.value = party.id;
+                    option.textContent = party.name;
+                    favouredPartySelect.appendChild(option);
+                });
+
+                favouredPartySelect.disabled = false;
+
+                
+            } else {
+                const noDataOption = document.createElement('option');
+                noDataOption.value = '';
+                noDataOption.textContent = 'Brak partii do wyboru';
+                favouredPartySelect.appendChild(noDataOption);
+            }
+        }
+
+        function updateCharts() {
+            const votesData = realResults;
+            const seatsData = realSeats;
+
+            const partyLabels = Object.keys(votesData).map(id => party_id_to_name[id]);
+            const partyVotes = Object.values(votesData);
+            const partySeats = Object.values(seatsData);
+            const fakeSeats = Object.values(seats);
+
+            const votesChartCtx = document.getElementById('votesChart').getContext('2d');
+            const realSeatsChartCtx = document.getElementById('realSeatsChart').getContext('2d');
+            const seatsChartCtx = document.getElementById('seatsChart').getContext('2d');
+
+            // Wykres głosów
+            new Chart(votesChartCtx, {
+                type: 'pie',
+                data: {
+                    labels: partyLabels,
+                    datasets: [{
+                        label: 'Votes',
+                        data: partyVotes,
+                        backgroundColor: Object.keys(votesData).map(name => partyColours[name]),
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+
+            // Wykres podziału miejsc
+            new Chart(realSeatsChartCtx, {
+                type: 'pie',
+                data: {
+                    labels: partyLabels,
+                    datasets: [{
+                        label: 'Seats',
+                        data: partySeats,
+                        backgroundColor: Object.keys(votesData).map(name => partyColours[name]),
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+
+            new Chart(seatsChartCtx, {
+                type: 'pie',
+                data: {
+                    labels: partyLabels,
+                    datasets: [{
+                        label: 'Seats',
+                        data: fakeSeats,
+                        backgroundColor: Object.keys(votesData).map(name => partyColours[name]),
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+
+            
+        }
+        
+        function generateLegend() {
+            const legendContainer = document.getElementById('legend');
+            legendContainer.innerHTML = ''; // Wyczyść zawartość legendy
+        
+            const partyLabels = Object.keys(realResults).map(id => party_id_to_name[id]);
+            const partyColors = Object.keys(realResults).map(id => partyColours[id]);
+        
+            partyLabels.forEach((label, index) => {
+                const legendItem = document.createElement('div');
+                legendItem.className = 'legend-item';
+        
+                const colorBox = document.createElement('div');
+                colorBox.className = 'legend-color';
+                colorBox.style.backgroundColor = partyColors[index];
+        
+                const text = document.createElement('span');
+                text.textContent = label;
+        
+                legendItem.appendChild(colorBox);
+                legendItem.appendChild(text);
+                legendContainer.appendChild(legendItem);
+            });
+        }
+        
+        // Wywołanie funkcji do wygenerowania legendy
+        generateLegend();
+        
+        updateCharts();
+
+        function redirectToResults() {
+            const electionSelect = document.getElementById('election-data');
+            const favouredPartySelect = document.getElementById('favoured-party');
+
+            const selectedElectionId = electionSelect.value;
+            const selectedFavouredPartyId = favouredPartySelect.value;
+
+            if (!selectedElectionId) {
+                alert('Proszę wybrać rok wyborów.');
+                return;
+            }
+
+            const redirectUrl = `/${selectedElectionId}/${selectedFavouredPartyId}/`;
+            window.location.href = redirectUrl;
+        }
+
+        const map = L.map('map').setView([52.114339, 19.423672], 6);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        function getColor(party) {
+            return partyColours[party];
+        }
+
+        function style(feature) {
+            return {
+                fillColor: getColor(feature.properties.winner),
+                weight: 0.5,
+                opacity: 1,
+                color: 'white',
+                dashArray: '1',
+                fillOpacity: 0.7
+            };
+        }
+
+        L.geoJSON(geojsonContent, {
+            style: style
+        }).addTo(map);
+    </script>
+</body>
+</html>

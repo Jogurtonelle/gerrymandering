@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Wyniki wyborów</title>
+
+    <!-- Link do stylów Leaflet -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+    <!-- Skrypt do Leaflet -->
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+    <style>
+        /* Ustawienia wysokości mapy */
+        #map {
+            height: 600px;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Wyniki wyborów {{ election.year }}</h1>
+    <h2>Faworyzowana partia: {{ favoured_party.name }}</h2>
+
+    <!-- Element do wyświetlania mapy -->
+    <div id="map"></div>
+
+    <script>
+        // Inicjalizacja mapy
+        var map = L.map('map').setView([52.0, 19.0], 6); // Współrzędne centrum mapy (Polska)
+
+        // Dodaj mapę
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // dodaj warstwę z geojson_content (mam jako string)
+        var geojson_content = {{ geojson_content|safe }};
+        L.geoJSON(geojson_content).addTo(map);
+
+    </script>
+
+</body>
+</html>
