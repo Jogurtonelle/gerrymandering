@@ -1,5 +1,6 @@
 from copy import deepcopy
 from math import exp
+import math
 import networkx as nx
 import numpy as np
 import random
@@ -663,20 +664,18 @@ def redist_flip_alg(graph: nx.Graph,
     
     # pop_eq /= avg_voters
 
+    #Getting boundary nodes - v such that N(v) & S_δ(S_delta) is not empty
     not_active_edges = set()
+    boundary_nodes = set()
     for edge in dist_graph.edges:
         if 'is_active' not in dist_graph.edges[edge]:
             dist_graph.edges[edge]['is_active'] = False
             not_active_edges.add(edge)
+            boundary_nodes.add(edge[0])
+            boundary_nodes.add(edge[1])
 
     active_edges = set(graph.edges) - not_active_edges
     
-    #Getting boundary nodes - v such that N(v) & S_δ(S_delta) is not empty
-    boundary_nodes = set()
-    for edge in not_active_edges:
-        boundary_nodes.add(edge[0])
-        boundary_nodes.add(edge[1])
-
     comp = len(not_active_edges) / len(dist_graph.edges)
     print(f"Initial compactness: {comp}")
 
@@ -826,10 +825,251 @@ def redist_flip_alg(graph: nx.Graph,
 
     return [[node for node in dist_dict if dist_dict.get(node) == i] for i in range(number_of_districts)], districts, data
 
-        
+import math
+import random
+import time
+from copy import deepcopy
+import networkx as nx
+
+
+def favouritism_alg(graph: nx.Graph,
+                    number_of_districts: int,
+                    parties_names: list,
+                    party_to_favour: str,
+                    deviation: float = 0.01,
+                    convergence_acceptance: float = 0.05,
+                    seed: int = int(time.time())) -> tuple:
+    random.seed(seed)
+
+    dist_graph = deepcopy(graph)
+
+    # Get index of the party to favour
+    party_index = parties_names.index(party_to_favour)
+
+    # Seeding and Initialization
+    best_wins = -1
+    closest_votes_to_win = np.inf
+    districts = []
+    for i in range(50):  # Initial seeding attempts
+        temp = seeding_algorithm(graph, number_of_districts, deviation, seed + i)
+        wins = 0
+        votes_to_win = np.inf
+
+        for dist in temp:
+            votes = [0] * len(parties_names)
+            for node in dist:
+                for j, party in enumerate(parties_names):
+                    votes[j] += graph.nodes[node][party]
+            if max(votes) == votes[party_index]:
+                wins += 1
+            else:
+                votes_to_win = min(votes_to_win, max(votes) - votes[party_index])
+
+        if wins > best_wins:
+            best_wins = wins
+            districts = temp
+        if wins == best_wins and votes_to_win < closest_votes_to_win:
+            closest_votes_to_win = votes_to_win
+            districts = temp
+            
+    # Prepare district mappings and edge activity
+    dist_dict = {}
+    dist_population_dict = {}
+    total_population = sum(graph.nodes[node].get('voters', 0) for node in graph.nodes)
+    avg_voters = int(total_population / number_of_districts)
+
+    for district_index, dist in enumerate(districts):
+        for node in dist:
+            dist_dict[node] = district_index
+            dist_population_dict[district_index] = dist_population_dict.get(district_index, 0) + graph.nodes[node]['voters']
+
+    # Mark inactive edges
+    not_active_edges = set()
+    for edge in graph.edges:
+        if dist_dict.get(edge[0]) != dist_dict.get(edge[1]):
+            not_active_edges.add(edge)
+            graph.edges[edge]['is_active'] = False
+        else:
+            graph.edges[edge]['is_active'] = True
+
+    # Metrics Initialization
+    voters_deviation = math.sqrt(sum((avg_voters - v)**2 for v in dist_population_dict.values()) / avg_voters)
+    tau = 0.01  # Initial temperature
+    step = 1
+    accepted = 0
+    record_wins = best_wins
+    data = []
+
+    # Main Optimization Loop
+    while True:
+        if step % 20 == 0:
+            print(f"Best wins: {best_wins}")
+            final_districts = [[node for node in dist_dict if dist_dict[node] == i] for i in range(number_of_districts)]
+            calculated_wins = sum(
+                1 if max(
+                    (sum(graph.nodes[node][party] for node in dist) for party in parties_names)
+                ) == sum(graph.nodes[node][party_to_favour] for node in dist)
+                else 0
+                for dist in final_districts
+            )
+
+            print(f"Record Wins: {record_wins}, Calculated Wins: {calculated_wins}")
+            if best_wins > record_wins:
+                record_wins = best_wins
+        if step % 100 == 0:
+            acceptance_rate = accepted / 100
+            print(f"Acceptance rate: {acceptance_rate:.4f}, Step: {step}")
+            data.append(acceptance_rate)
+            accepted = 0
+
+            # Convergence check
+            if acceptance_rate <= convergence_acceptance and best_wins == record_wins:
+                break
+            if step % 10000 == 0:
+                tau *= 0.85  # Gradual cooling
+
+        # Choose a random inactive edge and nodes
+        edge = random.choice(list(not_active_edges))
+        selected_node = random.choice(edge)
+        other_node = edge[0] if edge[1] == selected_node else edge[1]
+
+        # Current and new districts
+        curr_district = dist_dict[selected_node]
+        new_district = dist_dict[other_node]
+
+        # Validate district contiguity after removal
+        new_curr_district_nodes = {node for node in dist_dict if dist_dict[node] == curr_district} - {selected_node}
+        if not new_curr_district_nodes or not is_contiguous(new_curr_district_nodes, graph):
+            step += 1
+            continue
+
+        # Compute new deviation and wins
+        new_voters_deviation = compute_voters_deviation(
+            voters_deviation, dist_population_dict, avg_voters, selected_node, curr_district, new_district, graph)
+
+        delta_wins, proposed_wins = compute_delta_wins(
+            curr_district, new_district, selected_node, party_index, dist_dict, graph, parties_names)
+
+        # Acceptance probability
+        if delta_wins > 0:
+            acceptance_probability = 1.0
+        else:
+            delta_deviation = new_voters_deviation - voters_deviation
+            try:
+                acceptance_probability = math.exp(-delta_deviation / tau) * math.exp(delta_wins)
+            except OverflowError:
+                if -delta_deviation < 0:
+                    acceptance_probability = 0
+                else:
+                    acceptance_probability = 1
+
+        # Accept or Reject the move
+        if random.random() < acceptance_probability:
+            dist_dict[selected_node] = new_district
+            dist_population_dict[curr_district] -= graph.nodes[selected_node]['voters']
+            dist_population_dict[new_district] += graph.nodes[selected_node]['voters']
+            voters_deviation = new_voters_deviation
+            best_wins += delta_wins
+            accepted += 1
+
+            # Update edge activity
+            update_edge_activity(not_active_edges, graph, dist_dict)
+        step += 1
+
+    # Generate final districts
+    final_districts = [[node for node in dist_dict if dist_dict[node] == i] for i in range(number_of_districts)]
+    print (record_wins)
+    return final_districts, data
+
+
+def is_contiguous(nodes, graph):
+    """Check if a set of nodes is contiguous."""
+    visited = set()
+    stack = [next(iter(nodes))]
+    while stack:
+        current = stack.pop()
+        visited.add(current)
+        stack.extend(neighbor for neighbor in graph.neighbors(current) if neighbor in nodes and neighbor not in visited)
+    return visited == nodes
+
+
+def compute_voters_deviation(voters_deviation, dist_population_dict, avg_voters, node, curr_district, new_district, graph):
+    """Compute the new voters deviation."""
+    curr_pop = dist_population_dict[curr_district]
+    new_pop = dist_population_dict[new_district]
+    voters = graph.nodes[node]['voters']
+
+    return math.sqrt(
+        ((voters_deviation ** 2 * avg_voters)
+         - (curr_pop - avg_voters) ** 2 - (new_pop - avg_voters) ** 2
+         + (curr_pop - voters - avg_voters) ** 2
+         + (new_pop + voters - avg_voters) ** 2) / avg_voters)
+
+
+def compute_delta_wins(curr_district, new_district, node, party_index, dist_dict, graph, parties_names):
+    """Compute the change in wins."""
+    curr_votes = compute_votes(curr_district, dist_dict, graph, parties_names)
+    new_votes = compute_votes(new_district, dist_dict, graph, parties_names)
+    proposed_curr_votes = curr_votes.copy()
+    proposed_new_votes = new_votes.copy()
+
+    for j, party in enumerate(parties_names):
+        votes = graph.nodes[node][party]
+        proposed_curr_votes[j] -= votes
+        proposed_new_votes[j] += votes
+
+    delta_wins = 0
+    if curr_votes[party_index] == max(curr_votes):
+        delta_wins -= 1
+    if new_votes[party_index] == max(new_votes):
+        delta_wins -= 1
+    if proposed_curr_votes[party_index] == max(proposed_curr_votes):
+        delta_wins += 1
+    if proposed_new_votes[party_index] == max(proposed_new_votes):
+        delta_wins += 1
+    return delta_wins, (proposed_curr_votes, proposed_new_votes)
+
+
+def compute_votes(district, dist_dict, graph, parties_names):
+    """Compute the total votes in a district."""
+    votes = [0] * len(parties_names)
+    for node in dist_dict:
+        if dist_dict[node] == district:
+            for j, party in enumerate(parties_names):
+                votes[j] += graph.nodes[node][party]
+    return votes
+
+
+def update_edge_activity(not_active_edges, graph, dist_dict):
+    """Update the active/inactive status of edges."""
+    not_active_edges.clear()
+    for edge in graph.edges:
+        if dist_dict[edge[0]] != dist_dict[edge[1]]:
+            not_active_edges.add(edge)
+            graph.edges[edge]['is_active'] = False
+        else:
+            graph.edges[edge]['is_active'] = True
+
+
+
 
 import pickle as pkl
+import geopandas as gpd
+
 graph = pkl.load(open("pickle_files/graph_voters.pkl", "rb"))
+merged_gdf = gpd.read_file("temp/gminy_sejm_2023/gminy_sejm_2023.shp", encoding="utf-8")
+party_list = ["KOMIT_1", "KOMIT_2", "KOMIT_3", "KOMIT_4", "KOMIT_5", "KOMIT_6", "KOMIT_7", "KOMIT_8", "KOMIT_9", "KOMIT_10", "KOMIT_11", "KOMIT_12"]
+#add votes to the graph
+for index, row in merged_gdf.iterrows():
+    for party in party_list:
+        graph.nodes[row["JPT_KOD_JE"]][party] = row[party]
+
+favoured_party = "KOMIT_2" #Koalicja Obywatelska
+
+new,data = favouritism_alg(graph, 460, party_list, favoured_party, 0.01, 0.01)
+pkl.dump(new, open("temp/favouritism_alg.pkl", "wb"))
+pkl.dump(data, open("temp/favouritism_alg_data.pkl", "wb"))
+
 # # new, old = graph_cut_algorithm(graph, 100, max_iterations=2000, T=200, num_of_chains=2, lambda_val=5, beta_end=3)
 
 # threads = []
@@ -860,8 +1100,8 @@ graph = pkl.load(open("pickle_files/graph_voters.pkl", "rb"))
 
 
 
-new, old, data = redist_flip_alg(graph, 460, hot_steps=50, annealing_steps=200, cold_steps=100, lambda_prob=0.1, pop_tol_target=0.95, comp_weight_target=0.05)
+# new, old, data = redist_flip_alg(graph, 460, hot_steps=50, annealing_steps=200, cold_steps=100, lambda_prob=0.1, pop_tol_target=0.95, comp_weight_target=0.05)
 
-pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
-pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
-pkl.dump(data, open("temp/redist_flip_alg_data.pkl", "wb"))
+# pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
+# pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
+# pkl.dump(data, open("temp/redist_flip_alg_data.pkl", "wb"))
