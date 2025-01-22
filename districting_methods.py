@@ -850,7 +850,7 @@ def favouritism_alg(graph: nx.Graph,
     best_wins = -1
     closest_votes_to_win = np.inf
     districts = []
-    for i in range(50):  # Initial seeding attempts
+    for i in range(500):  # Initial seeding attempts
         temp = seeding_algorithm(graph, number_of_districts, deviation, seed + i)
         wins = 0
         votes_to_win = np.inf
@@ -882,6 +882,8 @@ def favouritism_alg(graph: nx.Graph,
         for node in dist:
             dist_dict[node] = district_index
             dist_population_dict[district_index] = dist_population_dict.get(district_index, 0) + graph.nodes[node]['voters']
+    
+    best_dist_dict = dist_dict.copy()
 
     # Mark inactive edges
     not_active_edges = set()
@@ -897,35 +899,32 @@ def favouritism_alg(graph: nx.Graph,
     tau = 0.01  # Initial temperature
     step = 1
     accepted = 0
+    accepted_sum = 0
     record_wins = best_wins
     data = []
 
     # Main Optimization Loop
     while True:
-        if step % 20 == 0:
-            print(f"Best wins: {best_wins}")
-            final_districts = [[node for node in dist_dict if dist_dict[node] == i] for i in range(number_of_districts)]
-            calculated_wins = sum(
-                1 if max(
-                    (sum(graph.nodes[node][party] for node in dist) for party in parties_names)
-                ) == sum(graph.nodes[node][party_to_favour] for node in dist)
-                else 0
-                for dist in final_districts
-            )
-
-            print(f"Record Wins: {record_wins}, Calculated Wins: {calculated_wins}")
-            if best_wins > record_wins:
-                record_wins = best_wins
-        if step % 100 == 0:
-            acceptance_rate = accepted / 100
-            print(f"Acceptance rate: {acceptance_rate:.4f}, Step: {step}")
+        if best_wins > record_wins:
+            record_wins = best_wins
+            best_dist_dict = dist_dict.copy()
+            
+        if step % 200 == 0:
+            acceptance_rate = accepted / 200
+            accepted_sum += acceptance_rate
+            print(f"Acceptance rate: {acceptance_rate:.3f}, Step: {step}")
+            print(f"Record Wins: {record_wins}, Best Wins: {best_wins}")
             data.append(acceptance_rate)
             accepted = 0
 
             # Convergence check
             if acceptance_rate <= convergence_acceptance and best_wins == record_wins:
+                best_dist_dict = dist_dict.copy()
                 break
             if step % 10000 == 0:
+                if accepted_sum / (10000/200) <= 0.5*convergence_acceptance:
+                    break
+                accepted_sum = 0
                 tau *= 0.85  # Gradual cooling
 
         # Choose a random inactive edge and nodes
@@ -947,16 +946,20 @@ def favouritism_alg(graph: nx.Graph,
         new_voters_deviation = compute_voters_deviation(
             voters_deviation, dist_population_dict, avg_voters, selected_node, curr_district, new_district, graph)
 
-        delta_wins, proposed_wins = compute_delta_wins(
+        delta_wins, delta_percentage = compute_delta_wins(
             curr_district, new_district, selected_node, party_index, dist_dict, graph, parties_names)
+
+        delta_percentage_weight = 0.2  # Weight for the change in percentage support
 
         # Acceptance probability
         if delta_wins > 0:
             acceptance_probability = 1.0
+        elif delta_percentage > delta_percentage_weight:
+            acceptance_probability = math.exp(delta_percentage) * math.exp(delta_wins * 10)
         else:
             delta_deviation = new_voters_deviation - voters_deviation
             try:
-                acceptance_probability = math.exp(-delta_deviation / tau) * math.exp(delta_wins)
+                acceptance_probability = math.exp(-delta_deviation / tau) * math.exp(delta_wins * 1/(2*tau))
             except OverflowError:
                 if -delta_deviation < 0:
                     acceptance_probability = 0
@@ -977,7 +980,7 @@ def favouritism_alg(graph: nx.Graph,
         step += 1
 
     # Generate final districts
-    final_districts = [[node for node in dist_dict if dist_dict[node] == i] for i in range(number_of_districts)]
+    final_districts = [[node for node in dist_dict if best_dist_dict[node] == i] for i in range(number_of_districts)]
     print (record_wins)
     return final_districts, data
 
@@ -1007,7 +1010,7 @@ def compute_voters_deviation(voters_deviation, dist_population_dict, avg_voters,
 
 
 def compute_delta_wins(curr_district, new_district, node, party_index, dist_dict, graph, parties_names):
-    """Compute the change in wins."""
+    """Compute the change in wins and weighted change in votes for the favored party."""
     curr_votes = compute_votes(curr_district, dist_dict, graph, parties_names)
     new_votes = compute_votes(new_district, dist_dict, graph, parties_names)
     proposed_curr_votes = curr_votes.copy()
@@ -1018,6 +1021,7 @@ def compute_delta_wins(curr_district, new_district, node, party_index, dist_dict
         proposed_curr_votes[j] -= votes
         proposed_new_votes[j] += votes
 
+    # Compute change in wins
     delta_wins = 0
     if curr_votes[party_index] == max(curr_votes):
         delta_wins -= 1
@@ -1027,7 +1031,19 @@ def compute_delta_wins(curr_district, new_district, node, party_index, dist_dict
         delta_wins += 1
     if proposed_new_votes[party_index] == max(proposed_new_votes):
         delta_wins += 1
-    return delta_wins, (proposed_curr_votes, proposed_new_votes)
+
+    # Compute change in percentage support
+    total_curr_votes = sum(proposed_curr_votes)
+    total_new_votes = sum(proposed_new_votes)
+
+    curr_party_percentage = (proposed_curr_votes[party_index] / total_curr_votes) if total_curr_votes > 0 else 0
+    new_party_percentage = (proposed_new_votes[party_index] / total_new_votes) if total_new_votes > 0 else 0
+
+    delta_percentage = new_party_percentage - curr_party_percentage
+
+    # Return both changes
+    return delta_wins, delta_percentage
+
 
 
 def compute_votes(district, dist_dict, graph, parties_names):
@@ -1057,18 +1073,18 @@ import pickle as pkl
 import geopandas as gpd
 
 graph = pkl.load(open("pickle_files/graph_voters.pkl", "rb"))
-merged_gdf = gpd.read_file("temp/gminy_sejm_2023/gminy_sejm_2023.shp", encoding="utf-8")
-party_list = ["KOMIT_1", "KOMIT_2", "KOMIT_3", "KOMIT_4", "KOMIT_5", "KOMIT_6", "KOMIT_7", "KOMIT_8", "KOMIT_9", "KOMIT_10", "KOMIT_11", "KOMIT_12"]
-#add votes to the graph
-for index, row in merged_gdf.iterrows():
-    for party in party_list:
-        graph.nodes[row["JPT_KOD_JE"]][party] = row[party]
+# merged_gdf = gpd.read_file("temp/gminy_sejm_2023/gminy_sejm_2023.shp", encoding="utf-8")
+# party_list = ["KOMIT_1", "KOMIT_2", "KOMIT_3", "KOMIT_4", "KOMIT_5", "KOMIT_6", "KOMIT_7", "KOMIT_8", "KOMIT_9", "KOMIT_10", "KOMIT_11", "KOMIT_12"]
+# #add votes to the graph
+# for index, row in merged_gdf.iterrows():
+#     for party in party_list:
+#         graph.nodes[row["JPT_KOD_JE"]][party] = row[party]
 
-favoured_party = "KOMIT_2" #Koalicja Obywatelska
+# favoured_party = "KOMIT_5" #Koalicja Obywatelska
 
-new,data = favouritism_alg(graph, 460, party_list, favoured_party, 0.01, 0.01)
-pkl.dump(new, open("temp/favouritism_alg.pkl", "wb"))
-pkl.dump(data, open("temp/favouritism_alg_data.pkl", "wb"))
+# new,data = favouritism_alg(graph, 460, party_list, favoured_party, 0.01, 0.01)
+# pkl.dump(new, open("temp/favouritism_alg.pkl", "wb"))
+# pkl.dump(data, open("temp/favouritism_alg_data.pkl", "wb"))
 
 # # new, old = graph_cut_algorithm(graph, 100, max_iterations=2000, T=200, num_of_chains=2, lambda_val=5, beta_end=3)
 
@@ -1100,8 +1116,8 @@ pkl.dump(data, open("temp/favouritism_alg_data.pkl", "wb"))
 
 
 
-# new, old, data = redist_flip_alg(graph, 460, hot_steps=50, annealing_steps=200, cold_steps=100, lambda_prob=0.1, pop_tol_target=0.95, comp_weight_target=0.05)
+new, old, data = redist_flip_alg(graph, 460, hot_steps=500, annealing_steps=2000, cold_steps=1000, lambda_prob=0.1, pop_tol_target=0.95, comp_weight_target=0.05)
 
-# pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
-# pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
-# pkl.dump(data, open("temp/redist_flip_alg_data.pkl", "wb"))
+pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
+pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
+pkl.dump(data, open("temp/redist_flip_alg_data.pkl", "wb"))
