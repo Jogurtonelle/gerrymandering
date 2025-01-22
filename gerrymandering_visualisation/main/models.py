@@ -26,6 +26,7 @@ class Party(models.Model):
 
 class Elections(models.Model):
     id = models.AutoField(primary_key=True)
+    name = models.CharField(max_length=100, blank=True)
     year = models.IntegerField(validators=[MaxValueValidator(now().year)])
     parties = models.ManyToManyField('Party', related_name='elections')
     real_results = models.JSONField() #real_results = {party_id: votes}
@@ -39,12 +40,12 @@ class Elections(models.Model):
     # This means Party with id 1 won 5 seats, Party with id 2 won 3 seats, and Party with id 3 won 2 seats.
 
     class Meta:
-        ordering = ['-year']
+        ordering = ['-year' , 'name']
         verbose_name = 'Elections'
         verbose_name_plural = 'Elections'
 
     def __str__(self):
-        return str(self.year) + ' (id: ' + str(self.id) + ')'
+        return str(self.name) + ' (id: ' + str(self.id) + ')'
 
 class ElectionData(models.Model):
     elections = models.ForeignKey('Elections', on_delete=models.CASCADE)
@@ -58,4 +59,4 @@ class ElectionData(models.Model):
         verbose_name_plural = 'Election Data'
 
     def __str__(self):
-        return f'{self.elections.year} - {self.favoured_party}' if self.favoured_party else f'{self.elections.year} - No favoured party'
+        return f'{self.elections.name} - {self.favoured_party}' if self.favoured_party else f'{self.elections.name} - No favoured party'

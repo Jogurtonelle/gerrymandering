@@ -912,8 +912,8 @@ def favouritism_alg(graph: nx.Graph,
         if step % 200 == 0:
             acceptance_rate = accepted / 200
             accepted_sum += acceptance_rate
-            print(f"Acceptance rate: {acceptance_rate:.3f}, Step: {step}")
-            print(f"Record Wins: {record_wins}, Best Wins: {best_wins}")
+            # print(f"Acceptance rate: {acceptance_rate:.3f}, Step: {step}")
+            # print(f"Record Wins: {record_wins}, Best Wins: {best_wins}")
             data.append(acceptance_rate)
             accepted = 0
 
@@ -922,6 +922,8 @@ def favouritism_alg(graph: nx.Graph,
                 best_dist_dict = dist_dict.copy()
                 break
             if step % 10000 == 0:
+                print(f"Acceptance rate: {acceptance_rate:.3f}, Step: {step}")
+                print(f"Record Wins: {record_wins}, Best Wins: {best_wins}")
                 if accepted_sum / (10000/200) <= 0.5*convergence_acceptance:
                     break
                 accepted_sum = 0
@@ -1073,16 +1075,23 @@ import pickle as pkl
 import geopandas as gpd
 
 graph = pkl.load(open("pickle_files/graph_voters.pkl", "rb"))
-# merged_gdf = gpd.read_file("temp/gminy_sejm_2023/gminy_sejm_2023.shp", encoding="utf-8")
-# party_list = ["KOMIT_1", "KOMIT_2", "KOMIT_3", "KOMIT_4", "KOMIT_5", "KOMIT_6", "KOMIT_7", "KOMIT_8", "KOMIT_9", "KOMIT_10", "KOMIT_11", "KOMIT_12"]
-# #add votes to the graph
-# for index, row in merged_gdf.iterrows():
-#     for party in party_list:
-#         graph.nodes[row["JPT_KOD_JE"]][party] = row[party]
+merged_gdf = gpd.read_file("temp/gminy_sejm_2023/gminy_sejm_2023.shp", encoding="utf-8")
+party_list = ["KOMIT_1", "KOMIT_2", "KOMIT_3", "KOMIT_4", "KOMIT_5", "KOMIT_6", "KOMIT_7", "KOMIT_8", "KOMIT_9", "KOMIT_10", "KOMIT_11", "KOMIT_12"]
+#add votes to the graph
+for index, row in merged_gdf.iterrows():
+    for party in party_list:
+        # if party in ["KOMIT_2", "KOMIT_3", "KOMIT_6"]:
+        #     graph.nodes[row["JPT_KOD_JE"]]["ZO"] = graph.nodes[row["JPT_KOD_JE"]].get("ZO", 0) + row[party]
+        # else:
+        graph.nodes[row["JPT_KOD_JE"]][party] = row[party]
 
-# favoured_party = "KOMIT_5" #Koalicja Obywatelska
+for favoured_party in ["KOMIT_4"]:
+    print(favoured_party)
+    new, data = favouritism_alg(graph, 100, party_list, favoured_party, 0.01, 0.01)
+    pkl.dump(new, open(f"temp/favouritism_alg_{favoured_party}.pkl", "wb"))
+    pkl.dump(data, open(f"temp/favouritism_alg_data_{favoured_party}.pkl", "wb"))
 
-# new,data = favouritism_alg(graph, 460, party_list, favoured_party, 0.01, 0.01)
+# new,data = favouritism_alg(graph, 100, party_list, favoured_party, 0.01, 0.01)
 # pkl.dump(new, open("temp/favouritism_alg.pkl", "wb"))
 # pkl.dump(data, open("temp/favouritism_alg_data.pkl", "wb"))
 
@@ -1116,8 +1125,8 @@ graph = pkl.load(open("pickle_files/graph_voters.pkl", "rb"))
 
 
 
-new, old, data = redist_flip_alg(graph, 460, hot_steps=500, annealing_steps=2000, cold_steps=1000, lambda_prob=0.1, pop_tol_target=0.95, comp_weight_target=0.05)
+# new, old, data = redist_flip_alg(graph, 100, hot_steps=500, annealing_steps=2000, cold_steps=1000, lambda_prob=0.1, pop_tol_target=0.95, comp_weight_target=0.05)
 
-pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
-pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
-pkl.dump(data, open("temp/redist_flip_alg_data.pkl", "wb"))
+# pkl.dump(new, open("temp/graph_cut_algorithm.pkl", "wb"))
+# pkl.dump(old, open("temp/graph_cut_algorithm_start.pkl", "wb"))
+# pkl.dump(data, open("temp/redist_flip_alg_data.pkl", "wb"))

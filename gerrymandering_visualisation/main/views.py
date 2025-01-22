@@ -31,9 +31,9 @@ def index(request, election_id, favoured_party_id):
         elections = Elections.objects.all()
 
         elections_to_parties = {}
-        for election in Elections.objects.all():
-            parties = election.parties.all()
-            elections_to_parties[election.id] = [
+        for e in Elections.objects.all():
+            parties = e.parties.all()
+            elections_to_parties[e.id] = [
                 {'id': party.id, 'name': party.name} for party in parties
             ]
 
@@ -62,3 +62,6 @@ def index(request, election_id, favoured_party_id):
 
     except ElectionData.DoesNotExist:
         raise Http404("Brak danych wyborczych dla podanych wyborów i partii")
+    
+def redirect_to_index(request):
+    return index(request, 1, 0)

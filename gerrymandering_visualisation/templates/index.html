@@ -93,7 +93,7 @@
                 <option value="">--select election year--</option>
                 {% for election in elections %}
                     <option value="{{ election.id }}">
-                        Elections {{ election.year }}
+                        Elections {{ election.name }}
                     </option>
                 {% endfor %}
             </select>
@@ -107,6 +107,13 @@
         </div>
 
         <button onclick="redirectToResults()">Show results</button>
+        
+        
+        {% if favoured_party.name %}
+            <p>{{ election.name }}, faworyzowana partia: {{ favoured_party.name }}</p>
+        {% else %}
+            <p>{{ election.name }}, brak faworyzowanej partii</p>
+        {% endif %}
 
         <div id="charts">
             <div class="chart-container">
