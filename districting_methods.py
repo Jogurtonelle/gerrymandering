@@ -1,6 +1,5 @@
 from copy import deepcopy
-from math import exp
-import math
+from math import exp, sqrt
 import networkx as nx
 import numpy as np
 import random
@@ -943,7 +942,7 @@ def favouritism_alg(graph: nx.Graph,
             graph.edges[edge]['is_active'] = True
 
     # Metrics Initialization
-    voters_deviation = math.sqrt(sum((avg_voters - v)**2 for v in dist_population_dict.values()) / avg_voters)
+    voters_deviation = sqrt(sum((avg_voters - v)**2 for v in dist_population_dict.values()) / avg_voters)
     tau = 0.01  # Initial temperature
     step = 1
     accepted = 0
@@ -999,11 +998,11 @@ def favouritism_alg(graph: nx.Graph,
         if delta_wins > 0:
             acceptance_probability = 1.0 # Always accept if the party to favour wins
         elif delta_percentage > delta_percentage_weight:
-            acceptance_probability = math.exp(delta_percentage) * math.exp(delta_wins * 10)
+            acceptance_probability = exp(delta_percentage) * exp(delta_wins * 10)
         else:
             delta_deviation = new_voters_deviation - voters_deviation
             try:
-                acceptance_probability = math.exp(-delta_deviation / tau) * math.exp(delta_wins * 1/(2*tau))
+                acceptance_probability = exp(-delta_deviation / tau) * exp(delta_wins * 1/(2*tau))
             except OverflowError:
                 if -delta_deviation < 0:
                     acceptance_probability = 0
@@ -1043,7 +1042,7 @@ def compute_voters_deviation(voters_deviation, dist_population_dict, avg_voters,
     new_pop = dist_population_dict[new_district]
     voters = graph.nodes[node]['voters']
 
-    return math.sqrt(
+    return sqrt(
         ((voters_deviation ** 2 * avg_voters)
          - (curr_pop - avg_voters) ** 2 - (new_pop - avg_voters) ** 2
          + (curr_pop - voters - avg_voters) ** 2
