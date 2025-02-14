@@ -9,7 +9,8 @@ import threading
 
 def seeding_algorithm(graph: nx.Graph,
                       number_of_districts: int,
-                      deriviation: float = 0.01,
+                      deviation: float = 0.01,
+                      retries: int = 100,
                       seed: int = int(time.time()),
                       ) -> list:
     """
@@ -24,10 +25,13 @@ def seeding_algorithm(graph: nx.Graph,
     number_of_districts : int
         The number of districts to create.
 
-    deriviation : float, optional
+    deviation : float, optional
         The deviation from the average number of voters in a district. 
         For 5% deviation, use 0.05. Default is 0.01 (1%).
         Derivation has to be between 0 and 1 (0% and 100%).
+
+    retries : int, optional
+        The number of retries if the algorithm fails to create districts. Default is 100.
 
     seed : int, optional
         The seed for the random number generator. Default is the current time.
@@ -43,12 +47,21 @@ def seeding_algorithm(graph: nx.Graph,
     [1] https://doi.org/10.1016/S0962-6298(99)00047-5
     """
 
-    if deriviation > 1 or deriviation < 0:
+    if deviation > 1 or deviation < 0:
             raise ValueError("Derivation has to be between 0 and 1")
+    
+    if number_of_districts < 1 or number_of_districts > len(graph.nodes):
+        raise ValueError("Number of districts has to be greater than 0 and less than the number of nodes in the graph")
+    
+    if not all('voters' in graph.nodes[node] for node in graph.nodes):
+        raise ValueError("Each node in the graph has to have a 'voters' attribute")
+    
+    if retries < 1:
+        raise ValueError("Number of retries has to be greater than 0")
 
     def seeding_algorithm_inner(graph: nx.Graph,
                                 number_of_districts: int,
-                                deriviation: float = 0.01,
+                                deviation: float = 0.01,
                                 seed: int = int(time.time()),
                                 ) -> list:
         """
@@ -69,10 +82,10 @@ def seeding_algorithm(graph: nx.Graph,
         except ZeroDivisionError:
             raise ValueError("Number of districts has to be greater than 0")
 
-        #Every county with more than the average number of voters (+/- deriviation) is considered a district and is removed from the graph
+        #Every county with more than the average number of voters (+/- deviation) is considered a district and is removed from the graph
         districts = []
         for node in graph_copy.nodes:
-            if graph_copy.nodes[node]['voters'] > average_voters * (1 + abs(deriviation)):
+            if graph_copy.nodes[node]['voters'] > average_voters * (1 + abs(deviation)):
                 districts.append([node])
         for district in districts:
             graph_copy.remove_node(district[0])
@@ -87,7 +100,7 @@ def seeding_algorithm(graph: nx.Graph,
             current_voters = graph_copy.nodes[district[0]]['voters']
 
             #Add neighbors to the district until the number of voters is close to the average
-            while current_voters < average_voters * (1 - deriviation) and len(graph_copy.nodes) > number_of_districts:
+            while current_voters < average_voters * (1 - deviation) and len(graph_copy.nodes) > number_of_districts:
                 #Add all neighbors of the district
                 neighbors = set()
                 for node in district:
@@ -103,7 +116,7 @@ def seeding_algorithm(graph: nx.Graph,
                 #Remove nodes that have too many voters
                 neighbors_copy = neighbors.copy()
                 for neighbor in neighbors_copy:
-                    if graph_copy.nodes[neighbor]['voters'] + current_voters > average_voters * (1 + deriviation):
+                    if graph_copy.nodes[neighbor]['voters'] + current_voters > average_voters * (1 + deviation):
                         neighbors.remove(neighbor)
 
                 #If there are no neighbors left, add the one that is the closest to the average number of voters
@@ -205,25 +218,21 @@ def seeding_algorithm(graph: nx.Graph,
 
         return districts, False
  
-    i = 100
-    while i > 0:
+    for i in range(retries):
         try:
-            result, try_again = seeding_algorithm_inner(graph, number_of_districts, deriviation, seed)
+            result, try_again = seeding_algorithm_inner(graph, number_of_districts, deviation, seed)
             if try_again:
-                deriviation *= 1.5
-                i -= 1
+                deviation *= 1.5
             else:
                 return result
         except ValueError as e:
-            i -= 1
-            print(f"Error in seeding algorithm - retrying {100 - i}/100")
             seed += 1
 
-    raise ValueError("Unexpected error in seeding algorithm")
+    raise ValueError("Unexpected error in seeding algorithm - try again with different parameters")
 
 def graph_cut_algorithm(graph: nx.Graph,
                         number_of_districts: int,
-                        deriviation: float = 0.01,
+                        deviation: float = 0.01,
                         lambda_val: int = 10,
                         beta_start: int = 1,
                         beta_end: int = 10,
@@ -245,7 +254,7 @@ def graph_cut_algorithm(graph: nx.Graph,
     number_of_districts : int
         Number of districts to form.
 
-    deriviation : float, optional
+    deviation : float, optional
         Acceptable deviation from equal population. Default is 0.01 (1%).
 
     q : float, optional
@@ -299,7 +308,7 @@ def graph_cut_algorithm(graph: nx.Graph,
     districts = []
     while temp:
         try:
-            districts = seeding_algorithm(graph, number_of_districts, deriviation, seed)
+            districts = seeding_algorithm(graph, number_of_districts, deviation, seed)
             temp = False
         except ValueError as e:
             seed += 1
@@ -825,32 +834,71 @@ def redist_flip_alg(graph: nx.Graph,
 
     return [[node for node in dist_dict if dist_dict.get(node) == i] for i in range(number_of_districts)], districts, data
 
-import math
-import random
-import time
-from copy import deepcopy
-import networkx as nx
-
-
 def favouritism_alg(graph: nx.Graph,
                     number_of_districts: int,
                     parties_names: list,
                     party_to_favour: str,
+                    initial_seeding_attempts: int = 500,
                     deviation: float = 0.01,
+                    delta_percentage_weight: float = 0.2,
                     convergence_acceptance: float = 0.05,
-                    seed: int = int(time.time())) -> tuple:
-    random.seed(seed)
+                    seed: int = int(time.time())) -> list:
 
-    dist_graph = deepcopy(graph)
+    """
+    Favouritism algorithm for redistricting. Alghorithm creates districts with the goal of maximizing the number of districts where the party to favour has the most votes.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        A graph representing the geographical units.
+        Each node should have a 'voters' attribute as well as number of votes for each party defined in parties_names. Name of each atribute should be the same as the party name in parties_names.
+
+    number_of_districts : int
+        Number of districts to form.
+
+    parties_names : list
+        List of party names. Each party should have a corresponding attribute in the graph.
+
+    party_to_favour : str
+        Name of the party to favour, the same as in parties_names.
+
+    initial_seeding_attempts : int, optional
+        Number of initial seeding attempts (guesses). Default is 500.
+
+    deviation : float, optional
+        The deviation from the average number of voters in a district.
+        It is used for the initial guess - seeding algorithm. Final deviation can be different.
+        For 5% deviation, use 0.05. Default is 0.01 (1%).
+        Derivation has to be between 0 and 1 (0% and 100%).
+
+    delta_percentage_weight : float, optional
+        The weight of the percentage difference in votes for the party to favour.
+        (If the percentage difference is greater than this value, the algorithm will accept the move, regardless of the change in the number of wins)
+
+    convergence_acceptance : float, optional
+        The acceptance rate for the algorithm to converge. Default is 0.05 (5%).
+        Per 200 steps, if the acceptance rate is below this value and the number of wins is not increasing, the algorithm stops.
+        Acceptance rate has to be between 0 and 1 (0% and 100%).
+
+    seed : int, optional
+        Random seed. Default is the current time.
+
+    Returns
+    -------
+    list
+        List of districts, where each district is a list of node IDs.
+    """
+
+    random.seed(seed)
 
     # Get index of the party to favour
     party_index = parties_names.index(party_to_favour)
 
-    # Seeding and Initialization
+    # Seeding and Initialization - Find the best initial seeding guess
     best_wins = -1
     closest_votes_to_win = np.inf
     districts = []
-    for i in range(500):  # Initial seeding attempts
+    for i in range(initial_seeding_attempts):
         temp = seeding_algorithm(graph, number_of_districts, deviation, seed + i)
         wins = 0
         votes_to_win = np.inf
@@ -872,9 +920,9 @@ def favouritism_alg(graph: nx.Graph,
             closest_votes_to_win = votes_to_win
             districts = temp
             
-    # Prepare district mappings and edge activity
-    dist_dict = {}
-    dist_population_dict = {}
+    # Prepare data structures
+    dist_dict = {} # Node to district mapping
+    dist_population_dict = {} # District to population mapping 
     total_population = sum(graph.nodes[node].get('voters', 0) for node in graph.nodes)
     avg_voters = int(total_population / number_of_districts)
 
@@ -883,7 +931,7 @@ def favouritism_alg(graph: nx.Graph,
             dist_dict[node] = district_index
             dist_population_dict[district_index] = dist_population_dict.get(district_index, 0) + graph.nodes[node]['voters']
     
-    best_dist_dict = dist_dict.copy()
+    best_dist_dict = dist_dict.copy() # Best districting (at the moment)
 
     # Mark inactive edges
     not_active_edges = set()
@@ -900,30 +948,26 @@ def favouritism_alg(graph: nx.Graph,
     step = 1
     accepted = 0
     accepted_sum = 0
-    record_wins = best_wins
-    data = []
+    wins = best_wins
 
     # Main Optimization Loop
     while True:
-        if best_wins > record_wins:
-            record_wins = best_wins
+        if wins > best_wins:
+            best_wins = wins
             best_dist_dict = dist_dict.copy()
             
         if step % 200 == 0:
             acceptance_rate = accepted / 200
             accepted_sum += acceptance_rate
-            # print(f"Acceptance rate: {acceptance_rate:.3f}, Step: {step}")
-            # print(f"Record Wins: {record_wins}, Best Wins: {best_wins}")
-            data.append(acceptance_rate)
             accepted = 0
 
             # Convergence check
-            if acceptance_rate <= convergence_acceptance and best_wins == record_wins:
+            if acceptance_rate <= convergence_acceptance and wins == best_wins:
                 best_dist_dict = dist_dict.copy()
                 break
             if step % 10000 == 0:
                 print(f"Acceptance rate: {acceptance_rate:.3f}, Step: {step}")
-                print(f"Record Wins: {record_wins}, Best Wins: {best_wins}")
+                print(f"Best wins: {best_wins}, Current wins: {wins}")
                 if accepted_sum / (10000/200) <= 0.5*convergence_acceptance:
                     break
                 accepted_sum = 0
@@ -951,11 +995,9 @@ def favouritism_alg(graph: nx.Graph,
         delta_wins, delta_percentage = compute_delta_wins(
             curr_district, new_district, selected_node, party_index, dist_dict, graph, parties_names)
 
-        delta_percentage_weight = 0.2  # Weight for the change in percentage support
-
         # Acceptance probability
         if delta_wins > 0:
-            acceptance_probability = 1.0
+            acceptance_probability = 1.0 # Always accept if the party to favour wins
         elif delta_percentage > delta_percentage_weight:
             acceptance_probability = math.exp(delta_percentage) * math.exp(delta_wins * 10)
         else:
@@ -974,18 +1016,16 @@ def favouritism_alg(graph: nx.Graph,
             dist_population_dict[curr_district] -= graph.nodes[selected_node]['voters']
             dist_population_dict[new_district] += graph.nodes[selected_node]['voters']
             voters_deviation = new_voters_deviation
-            best_wins += delta_wins
+            wins += delta_wins
             accepted += 1
 
             # Update edge activity
             update_edge_activity(not_active_edges, graph, dist_dict)
+
         step += 1
 
     # Generate final districts
-    final_districts = [[node for node in dist_dict if best_dist_dict[node] == i] for i in range(number_of_districts)]
-    print (record_wins)
-    return final_districts, data
-
+    return [[node for node in dist_dict if best_dist_dict[node] == i] for i in range(number_of_districts)]
 
 def is_contiguous(nodes, graph):
     """Check if a set of nodes is contiguous."""
@@ -996,7 +1036,6 @@ def is_contiguous(nodes, graph):
         visited.add(current)
         stack.extend(neighbor for neighbor in graph.neighbors(current) if neighbor in nodes and neighbor not in visited)
     return visited == nodes
-
 
 def compute_voters_deviation(voters_deviation, dist_population_dict, avg_voters, node, curr_district, new_district, graph):
     """Compute the new voters deviation."""
@@ -1009,7 +1048,6 @@ def compute_voters_deviation(voters_deviation, dist_population_dict, avg_voters,
          - (curr_pop - avg_voters) ** 2 - (new_pop - avg_voters) ** 2
          + (curr_pop - voters - avg_voters) ** 2
          + (new_pop + voters - avg_voters) ** 2) / avg_voters)
-
 
 def compute_delta_wins(curr_district, new_district, node, party_index, dist_dict, graph, parties_names):
     """Compute the change in wins and weighted change in votes for the favored party."""
@@ -1046,8 +1084,6 @@ def compute_delta_wins(curr_district, new_district, node, party_index, dist_dict
     # Return both changes
     return delta_wins, delta_percentage
 
-
-
 def compute_votes(district, dist_dict, graph, parties_names):
     """Compute the total votes in a district."""
     votes = [0] * len(parties_names)
@@ -1056,7 +1092,6 @@ def compute_votes(district, dist_dict, graph, parties_names):
             for j, party in enumerate(parties_names):
                 votes[j] += graph.nodes[node][party]
     return votes
-
 
 def update_edge_activity(not_active_edges, graph, dist_dict):
     """Update the active/inactive status of edges."""
@@ -1067,8 +1102,6 @@ def update_edge_activity(not_active_edges, graph, dist_dict):
             graph.edges[edge]['is_active'] = False
         else:
             graph.edges[edge]['is_active'] = True
-
-
 
 
 import pickle as pkl
