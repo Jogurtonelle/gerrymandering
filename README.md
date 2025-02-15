@@ -16,6 +16,8 @@ Django web application for interactive analysis of the case study
 - **Comparative scenarios**:
   - Fair vs. gerrymandered configurations
   - Fragmented vs. united opposition strategies (Poland 2023 parlimentary elections)
+
+### To turn on the server - run `run.bat` file
 ---
 
 ## 📌 Case Study: 2023 Polish Parliamentary Elections
