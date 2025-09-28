@@ -7,7 +7,7 @@
 
 ### `districting_methods.py`  
 Core module implementing electoral districting algorithms:
-- **Fair districting** – Maximizing proportional representation
+- **Fair districting** – Maximizing proportional representation and/or compactness
 - **Partisan gerrymandering** – Simulating biased district configurations
 
 ### `/gerrymandering_visualisation`  
@@ -18,6 +18,13 @@ Django web application for interactive analysis of the case study
   - Fragmented vs. united opposition strategies (Poland 2023 parlimentary elections)
 
 ### To turn on the server - run `run.bat` file
+
+### `run.ipynb`  
+Jupyter notebook for executing districting algorithms with customizable parameters
+
+### `show_results.ipynb`
+Jupyter notebook for visualizing and analyzing results from districting algorithms
+
 ---
 
 ## 📌 Case Study: 2023 Polish Parliamentary Elections
